@@ -10,7 +10,7 @@ import threading
 import time
 import numpy as np
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from scipy.signal import butter, lfilter
 import psutil
@@ -21,7 +21,7 @@ import glob
 import sys
 import subprocess
 from obspy import Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
@@ -114,7 +114,7 @@ class EventDataManager:
         try:
             # Calcular timestamp real del inicio de la anomalía (10 segundos antes)
             detection_time = detection_result['timestamp']
-            real_event_start = detection_time - datetime.timedelta(seconds=10)
+            real_event_start = detection_time - timedelta(seconds=10)
             
             event_id = real_event_start.strftime('%Y%m%d_%H%M%S')
             
