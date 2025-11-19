@@ -20,6 +20,9 @@ import json
 import glob
 import sys
 import subprocess
+import uuid
+from obspy import Stream, Trace, UTCDateTime
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -668,7 +671,7 @@ class TwoSecondLatencyDetector:
         self.window_size = 10 * sampling_rate  # 1000 muestras - 10 SEGUNDOS
         # PARÁMETROS OPTIMIZADOS PARA VELOCIDAD MÁXIMA
         self.latency_target = 0.1  # 300 ms entre procesamientos
-        self.confidence_threshold = 0.95  # Menor umbral para mayor sensibilidad
+        self.confidence_threshold = 9.0  # Umbral de sensibilidad aumentado
         self.consecutive_windows = 1  # Una sola detección
         
         # Componentes ultra-rápidos
@@ -699,6 +702,17 @@ class TwoSecondLatencyDetector:
         # Control de procesamiento
         self.last_processing_time = 0
         self.detection_buffer = deque(maxlen=3)
+        
+        # Configuración de estación
+        self.station_id = "SKYALERT_ORIN_NANO"
+        
+        # Buffer para MiniSEED (15 segundos antes del evento)
+        self.miniseed_buffer = {
+            'ENZ': deque(maxlen=1500),  # 15 segundos a 100Hz
+            'ENE': deque(maxlen=1500),
+            'ENN': deque(maxlen=1500)
+        }
+        self.miniseed_timestamps = deque(maxlen=1500)
         
         # Hilos
         self.receiver_thread = None
@@ -802,7 +816,7 @@ class TwoSecondLatencyDetector:
     def _calculate_confidence(self, result_data):
         """Calcula confianza ultra-rápida"""
         if result_data['result'][0] == 1:
-            return 0.75  # Confianza fija para velocidad
+            return 9.8  # Confianza alta para anomalías detectadas
         return 0.0
     
     def evaluate_detection(self, result):
@@ -822,50 +836,100 @@ class TwoSecondLatencyDetector:
     
     def trigger_alert(self, detection_result):
         """Activa alerta sísmica ULTRA-RÁPIDA"""
-        # UMBRAL MUY BAJO PARA PRUEBAS - AJUSTAR SEGÚN NECESIDAD
-        if detection_result['magnitude'] is None or detection_result['magnitude'] < 0.6:
-            logging.info(f"Evento descartado - Magnitud: {detection_result['magnitude']}")
-            return
-        
-        self.detection_count += 1
-        self.last_detection_time = detection_result['timestamp']
-        
-        alert_message = (
-            f"🚨 ALERTA: SISMO CONFIRMADO 🚨 - "
-            f"Confianza: {detection_result['confidence']:.3f} | "
-            f"Magnitud: {detection_result['magnitude']:.1f} | "
-            f"Ventana: {detection_result['processing_id']}"
-            f"Latencia: {detection_result['processing_time']:.3f}s | "
-        )
-        
-        logging.critical(alert_message)
-        self.save_event_data(detection_result)
+        # Verificar criterios estrictos para sismo confirmado
+        if (detection_result['confidence'] >= 9.6 and 
+            detection_result['magnitude'] is not None and 
+            detection_result['magnitude'] >= 2.1):
+            
+            self.detection_count += 1
+            self.last_detection_time = detection_result['timestamp']
+            
+            alert_message = (
+                f"🚨 ALERTA: SISMO CONFIRMADO 🚨 - "
+                f"Confianza: {detection_result['confidence']:.3f} | "
+                f"Magnitud: {detection_result['magnitude']:.1f} | "
+                f"Ventana: {detection_result['processing_id']}"
+                f"Latencia: {detection_result['processing_time']:.3f}s | "
+            )
+            
+            logging.critical(alert_message)
+            self.save_event_data(detection_result)
+        else:
+            logging.info(f"Evento descartado - Confianza: {detection_result['confidence']:.3f}, Magnitud: {detection_result['magnitude']}")
     
     def save_event_data(self, detection_result):
-        """Guarda datos del evento rápidamente"""
+        """Guarda JSON inmediatamente y programa MiniSEED para 60s después"""
         try:
             events_dir = "events"
             if not os.path.exists(events_dir):
                 os.makedirs(events_dir)
-                
-            filename = os.path.join(events_dir, f"event_ULTRAFAST_{detection_result['timestamp'].strftime('%Y%m%d_%H%M%S')}.npz")
-            np.savez_compressed(
-                filename,
-                timestamp=detection_result['timestamp'],
-                magnitude=detection_result['magnitude'],
-                confidence=detection_result['confidence'],
-                processing_time=detection_result['processing_time'],
-                processing_id=detection_result['processing_id'],
-                waveform_data=detection_result['window_data'],
-                detection_count=self.detection_count
-            )
-            logging.info(f"Evento ULTRA-RÁPIDO guardado: {filename}")
-        except (OSError, IOError) as e:
-            logging.error(f"Error de E/S guardando evento: {e}")
-        except (KeyError, AttributeError) as e:
-            logging.error(f"Error de datos guardando evento: {e}")
+            
+            # Generar ID único del evento
+            event_id = str(uuid.uuid4())[:8]
+            timestamp_str = detection_result['timestamp'].strftime('%Y%m%d_%H%M%S')
+            
+            # 1. Guardar JSON inmediatamente
+            json_data = {
+                "station_id": self.station_id,
+                "event_id": event_id,
+                "timestamp": detection_result['timestamp'].isoformat(),
+                "confidence": detection_result['confidence'],
+                "magnitude": detection_result['magnitude']
+            }
+            
+            json_filename = os.path.join(events_dir, f"event_{timestamp_str}.json")
+            with open(json_filename, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            logging.info(f"JSON guardado: {json_filename}")
+            
+            # 2. Programar MiniSEED para 60 segundos después
+            miniseed_timer = threading.Timer(60.0, self._save_miniseed, 
+                                           args=[event_id, timestamp_str, detection_result['timestamp']])
+            miniseed_timer.daemon = True
+            miniseed_timer.start()
+            logging.info(f"MiniSEED programado para 60s: event_{timestamp_str}.mseed")
+            
         except Exception as e:
-            logging.error(f"Error inesperado guardando evento: {e}")
+            logging.error(f"Error guardando evento: {e}")
+    
+    def _save_miniseed(self, event_id, timestamp_str, event_time):
+        """Guarda archivo MiniSEED con 1 minuto de datos (15s antes del evento)"""
+        try:
+            events_dir = "events"
+            
+            # Crear stream ObsPy
+            stream = Stream()
+            
+            # Obtener datos de los últimos 60 segundos (6000 muestras)
+            for i, component in enumerate(['ENZ', 'ENE', 'ENN']):
+                channel_code = ['HHZ', 'HHE', 'HHN'][i]
+                
+                # Extraer últimas 6000 muestras (60 segundos)
+                buffer_data = list(self.miniseed_buffer[component])[-6000:] if len(self.miniseed_buffer[component]) >= 6000 else list(self.miniseed_buffer[component])
+                
+                if len(buffer_data) < 6000:
+                    # Rellenar con ceros si no hay suficientes datos
+                    buffer_data = [0.0] * (6000 - len(buffer_data)) + buffer_data
+                
+                # Crear trace
+                stats = Stats()
+                stats.network = "SK"
+                stats.station = "ORIN"
+                stats.location = "00"
+                stats.channel = channel_code
+                stats.sampling_rate = 100.0
+                stats.starttime = UTCDateTime(event_time) - 15  # 15 segundos antes del evento
+                
+                trace = Trace(data=np.array(buffer_data, dtype=np.float32), header=stats)
+                stream.append(trace)
+            
+            # Guardar MiniSEED
+            mseed_filename = os.path.join(events_dir, f"event_{timestamp_str}.mseed")
+            stream.write(mseed_filename, format='MSEED')
+            logging.info(f"MiniSEED guardado: {mseed_filename}")
+            
+        except Exception as e:
+            logging.error(f"Error guardando MiniSEED: {e}")
     
     def processing_loop(self):
         """Bucle de procesamiento ULTRA-RÁPIDO"""
@@ -932,6 +996,12 @@ class TwoSecondLatencyDetector:
                                     current_time
                                 )
                                 
+                                # Actualizar buffer MiniSEED
+                                if parsed_data['component'] in self.miniseed_buffer:
+                                    self.miniseed_buffer[parsed_data['component']].extend(parsed_data['data'])
+                                    for _ in parsed_data['data']:
+                                        self.miniseed_timestamps.append(current_time)
+                                
                                 self.visualizer.update_data(
                                     parsed_data['component'],
                                     parsed_data['data'],
@@ -968,6 +1038,7 @@ class TwoSecondLatencyDetector:
         logging.info(f" Ventana: {self.window_size} muestras")
         logging.info(f" Latencia: {self.latency_target}s")
         logging.info(f" Confianza: {self.confidence_threshold}")
+        logging.info(f" Estación: {self.station_id}")
         
         # Hilo de recepción
         self.receiver_thread = threading.Thread(
