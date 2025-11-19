@@ -180,9 +180,15 @@ class RealTimeVisualizer:
     
     def setup_creime_markers(self):
         """Configura los marcadores visuales para la ventana CREIME_RT"""
+        if not hasattr(self, 'ax1') or self.ax1 is None:
+            logging.warning("Ejes no disponibles para marcadores CREIME_RT")
+            return
+            
         try:
             # Crear líneas verticales punteadas para marcar la ventana CREIME_RT
             for ax in [self.ax1, self.ax2, self.ax3]:
+                if ax is None:
+                    continue
                 # Línea de inicio de ventana (2 segundos atrás)
                 start_line = ax.axvline(x=0, color=COLOR_RED, linestyle='--', 
                                       linewidth=2, alpha=0.7, label='Inicio Ventana CREIME_RT')
@@ -202,8 +208,12 @@ class RealTimeVisualizer:
             # Agregar leyenda para los marcadores (solo en el primer subplot)
             self.ax1.legend(loc='upper left', fontsize=9)
             
-        except Exception as e:
+        except (AttributeError, ValueError) as e:
             logging.error(f"Error configurando marcadores CREIME_RT: {e}")
+            self.visualization_enabled = False
+        except Exception as e:
+            logging.error(f"Error inesperado configurando marcadores CREIME_RT: {e}")
+            self.visualization_enabled = False
     
     def update_creime_markers(self, current_time_sec, rel_times):
         """Actualiza la posición de los marcadores CREIME_RT"""
@@ -231,11 +241,13 @@ class RealTimeVisualizer:
                 markers['start_line'].set_xdata([start_pos, start_pos])
                 markers['end_line'].set_xdata([end_pos, end_pos])
                 
-                # Actualizar área sombreada
-                markers['fill'].remove()
-                ax = markers['start_line'].axes
-                new_fill = ax.axvspan(start_pos, end_pos, color=COLOR_RED, alpha=0.1)
-                markers['fill'] = new_fill
+                # Actualizar área sombreada eficientemente
+                try:
+                    markers['fill'].set_xy([[start_pos, -1e6], [start_pos, 1e6], [end_pos, 1e6], [end_pos, -1e6]])
+                except (AttributeError, ValueError):
+                    markers['fill'].remove()
+                    ax = markers['start_line'].axes
+                    markers['fill'] = ax.axvspan(start_pos, end_pos, color=COLOR_RED, alpha=0.1)
     
     def calculate_dynamic_ylimits(self, data, component_name):
         """Algoritmo para escalado dinámico"""
@@ -387,8 +399,8 @@ class UltraFastBuffer:
         self.update_interval = update_interval
         self.update_samples = int(update_interval * sampling_rate)
         
-        # Buffer muy pequeño para máxima velocidad
-        total_size = self.window_size + (1 * self.update_samples)  # 400 muestras máximo
+        # Buffer optimizado para ventana de 10 segundos
+        total_size = self.window_size + (2 * self.update_samples)  # 1200 muestras máximo
         self.buffers = {
             'ENZ': deque(maxlen=total_size),
             'ENE': deque(maxlen=total_size),
@@ -448,18 +460,20 @@ class UltraFastBuffer:
             if not self.ready:
                 return None
             
-            # Extraer ventana actual (últimos 200 puntos)
+            # Extraer ventana actual (últimos 1000 puntos - 10 segundos)
             window_data = []
             for component in ['ENZ', 'ENE', 'ENN']:
-                component_data = list(self.buffers[component])
+                buf = self.buffers[component]
+                buf_len = len(buf)
                 
                 # RELLENAR RÁPIDAMENTE SI NO HAY SUFICIENTES DATOS
-                if len(component_data) < self.window_size:
-                    padding_needed = self.window_size - len(component_data)
-                    padding = [0.0] * padding_needed
-                    component_data = padding + component_data
+                if buf_len < self.window_size:
+                    padding_needed = self.window_size - buf_len
+                    component_data = [0.0] * padding_needed + list(buf)
                 else:
-                    component_data = component_data[-self.window_size:]
+                    # Usar slicing directo en deque para mejor rendimiento
+                    start_idx = buf_len - self.window_size
+                    component_data = [buf[i] for i in range(start_idx, buf_len)]
                 
                 window_data.append(component_data)
             
@@ -579,9 +593,15 @@ class UltraFastProcessingPipeline:
                 start_time = time.time()
                 
                 # Procesamiento directo
-                # amazonq-ignore-next-line
-                y_pred, predictions = model.predict(window_data)
-                result = predictions[0]
+                try:
+                    y_pred, predictions = model.predict(window_data)
+                    result = predictions[0] if predictions else (0, None)
+                except (IndexError, ValueError, TypeError) as e:
+                    logging.warning(f"Error en predicción del modelo: {e}")
+                    result = (0, None)
+                except Exception as e:
+                    logging.error(f"Error inesperado en predicción: {e}")
+                    result = (0, None)
                 
                 processing_time = time.time() - start_time
                 
@@ -600,8 +620,10 @@ class UltraFastProcessingPipeline:
                 logging.error(f"Error en worker: {e}")
                 try:
                     self.processing_queue.task_done()
-                except:
-                    pass
+                except ValueError as ve:
+                    logging.warning(f"Error en task_done: {ve}")
+                except Exception as ee:
+                    logging.error(f"Error inesperado en task_done: {ee}")
                 continue
     
     def submit_window(self, window_data, processing_id):
@@ -642,8 +664,8 @@ class TwoSecondLatencyDetector:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # CONFIGURACIÓN ULTRA-RÁPIDA - VENTANA MÍNIMA
-        self.window_size = 2 * sampling_rate  # 200 muestras - 2 SEGUNDOS
+        # CONFIGURACIÓN ULTRA-RÁPIDA - VENTANA EXTENDIDA
+        self.window_size = 10 * sampling_rate  # 1000 muestras - 10 SEGUNDOS
         # PARÁMETROS OPTIMIZADOS PARA VELOCIDAD MÁXIMA
         self.latency_target = 0.1  # 300 ms entre procesamientos
         self.confidence_threshold = 0.95  # Menor umbral para mayor sensibilidad
@@ -683,7 +705,7 @@ class TwoSecondLatencyDetector:
         self.processing_thread = None
         
         logging.info("=== SISTEMA CONFIGURADO ===")
-        logging.info(f"VENTANA MÍNIMA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
+        logging.info(f"VENTANA EXTENDIDA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
         logging.info(f"LATENCIA OBJETIVO: {self.latency_target} segundos")
         logging.info(f"CONFIANZA: {self.confidence_threshold}")
     
@@ -838,8 +860,12 @@ class TwoSecondLatencyDetector:
                 detection_count=self.detection_count
             )
             logging.info(f"Evento ULTRA-RÁPIDO guardado: {filename}")
+        except (OSError, IOError) as e:
+            logging.error(f"Error de E/S guardando evento: {e}")
+        except (KeyError, AttributeError) as e:
+            logging.error(f"Error de datos guardando evento: {e}")
         except Exception as e:
-            logging.error(f"Error guardando evento: {e}")
+            logging.error(f"Error inesperado guardando evento: {e}")
     
     def processing_loop(self):
         """Bucle de procesamiento ULTRA-RÁPIDO"""
@@ -969,14 +995,14 @@ class TwoSecondLatencyDetector:
             time.sleep(0.1)
             status = self.buffer.get_buffer_status()
             current_samples = status['ENZ']['samples']
-            buffer_ready = current_samples >= 50  # 0.5 segundos
+            buffer_ready = current_samples >= 50  # 0.5 segundos (sin cambios en inicialización)
             
             if not buffer_ready and (time.time() - startup_time > 1):
                 elapsed = time.time() - startup_time
-                logging.info(f"Inicializando buffer: {current_samples}/200 muestras ({elapsed:.1f}s)")
+                logging.info(f"Inicializando buffer: {current_samples}/1000 muestras ({elapsed:.1f}s)")
         
         if buffer_ready:
-            logging.info("SISTEMA OPERATIVO - Detección activa en 2 SEGUNDOS")
+            logging.info("SISTEMA OPERATIVO - Detección activa con ventana de 10 SEGUNDOS")
         else:
             logging.warning(" Sistema operativo con buffer parcial")
         
