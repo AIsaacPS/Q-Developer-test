@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -620,12 +620,16 @@ class MiniSeedSimulator:
             channel_mapping = {}
             for tr in stream:
                 channel = tr.stats.channel
-                if 'Z' in channel:
+                # Mapeo más robusto de canales
+                if 'Z' in channel.upper():
                     channel_mapping['ENZ'] = tr
-                elif 'E' in channel or '1' in channel:
+                    logging.info(f"Canal Z mapeado: {channel} -> ENZ")
+                elif 'E' in channel.upper() or '1' in channel or 'EW' in channel.upper():
                     channel_mapping['ENE'] = tr
-                elif 'N' in channel or '2' in channel:
+                    logging.info(f"Canal E mapeado: {channel} -> ENE")
+                elif 'N' in channel.upper() or '2' in channel or 'NS' in channel.upper():
                     channel_mapping['ENN'] = tr
+                    logging.info(f"Canal N mapeado: {channel} -> ENN")
             
             if len(channel_mapping) < 3:
                 raise ValueError(f"Se requieren 3 componentes, encontrados: {len(channel_mapping)}")
@@ -636,14 +640,19 @@ class MiniSeedSimulator:
                 if len(tr.data) < min_length:
                     raise ValueError(f"Componente {comp}: {len(tr.data)} muestras < {min_length} mínimas (15s)")
             
-            # Validar frecuencia de muestreo
+            # Validar y ajustar frecuencia de muestreo
             for comp, tr in channel_mapping.items():
-                if abs(tr.stats.sampling_rate - self.sampling_rate) > 0.1:
-                    logging.warning(f"Frecuencia {comp}: {tr.stats.sampling_rate} Hz, esperada: {self.sampling_rate} Hz")
+                actual_rate = tr.stats.sampling_rate
+                if abs(actual_rate - self.sampling_rate) > 0.1:
+                    logging.warning(f"Frecuencia {comp}: {actual_rate} Hz, esperada: {self.sampling_rate} Hz")
+                    # Resamplear si es necesario
+                    if actual_rate != self.sampling_rate:
+                        tr.resample(self.sampling_rate)
+                        logging.info(f"Remuestreado {comp} de {actual_rate} Hz a {self.sampling_rate} Hz")
             
             self.stream_data = channel_mapping
             
-            # Información del archivo
+            # Información detallada del archivo
             total_samples = min(len(tr.data) for tr in channel_mapping.values())
             duration = total_samples / self.sampling_rate
             
@@ -651,6 +660,14 @@ class MiniSeedSimulator:
             logging.info(f"   Duración: {duration:.1f} segundos ({total_samples} muestras)")
             logging.info(f"   Componentes: {list(channel_mapping.keys())}")
             logging.info(f"   Frecuencia: {self.sampling_rate} Hz")
+            
+            # Mostrar estadísticas de cada componente
+            for comp, tr in channel_mapping.items():
+                data_min = np.min(tr.data)
+                data_max = np.max(tr.data)
+                data_mean = np.mean(tr.data)
+                data_std = np.std(tr.data)
+                logging.info(f"   {comp}: min={data_min:.6f}, max={data_max:.6f}, mean={data_mean:.6f}, std={data_std:.6f}")
             
             return True
             
@@ -672,6 +689,9 @@ class MiniSeedSimulator:
         
         sample_index = 0
         packet_interval = (samples_per_packet / self.sampling_rate) / self.playback_speed
+        start_simulation_time = time.time()
+        
+        logging.info(f"Iniciando simulación: {total_samples} muestras, intervalo {packet_interval:.4f}s")
         
         while self.running and sample_index < total_samples - samples_per_packet:
             try:
@@ -681,24 +701,37 @@ class MiniSeedSimulator:
                         tr = self.stream_data[component]
                         packet_data = tr.data[sample_index:sample_index + samples_per_packet]
                         
-                        # Aplicar filtro
-                        filtered_data = self.hybrid_filter.apply_filter(packet_data.tolist())
+                        # Convertir a lista y mantener datos originales
+                        raw_data = packet_data.astype(np.float32).tolist()
                         
-                        # Añadir al buffer
+                        # Diagnóstico para primeros paquetes
+                        if self.packet_count < 3:
+                            logging.info(f"Paquete {self.packet_count} {component}: {raw_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
+                        
+                        # Añadir al buffer con timestamp secuencial
                         current_time = time.time()
-                        self.buffer.add_data(component, filtered_data, current_time)
+                        self.buffer.add_data(component, raw_data, current_time)
                         
-                        # Actualizar visualizador
-                        self.visualizer.update_data(component, filtered_data, current_time)
+                        # Actualizar visualizador con datos originales
+                        self.visualizer.update_data(component, raw_data, current_time)
                 
                 self.packet_count += 1
                 sample_index += samples_per_packet
                 
-                # Progreso
+                # Progreso y diagnóstico
                 if self.packet_count % 100 == 0:
                     progress = (sample_index / total_samples) * 100
                     elapsed = sample_index / self.sampling_rate
-                    logging.info(f"Progreso: {progress:.1f}% - Tiempo simulado: {elapsed:.1f}s")
+                    real_elapsed = time.time() - start_simulation_time
+                    
+                    # Mostrar muestra de datos para diagnóstico
+                    if self.packet_count == 100:
+                        for comp in ['ENZ', 'ENE', 'ENN']:
+                            if comp in self.stream_data:
+                                sample_data = self.stream_data[comp].data[sample_index:sample_index+5]
+                                logging.info(f"Muestra {comp}[{sample_index}:{sample_index+5}]: {sample_data}")
+                    
+                    logging.info(f"Progreso: {progress:.1f}% - Sim: {elapsed:.1f}s - Real: {real_elapsed:.1f}s")
                 
                 # Esperar según velocidad de reproducción
                 time.sleep(packet_interval)
@@ -961,14 +994,26 @@ def main():
     """Función principal del simulador"""
     import argparse
     
+    # OPCIÓN 1: Hardcodear archivo (descomenta y modifica la siguiente línea)
+    # MINISEED_FILE = "mi_archivo.mseed"  # <-- AQUÍ PONES TU ARCHIVO
+    
     parser = argparse.ArgumentParser(description='Simulador CREIME_RT con archivos MiniSEED')
-    parser.add_argument('miniseed_file', help='Archivo MiniSEED de entrada (mínimo 15 segundos)')
+    parser.add_argument('miniseed_file', nargs='?', help='Archivo MiniSEED de entrada (mínimo 15 segundos)')
     parser.add_argument('--model_path', default='../saipy/saved_models/', help='Ruta del modelo CREIME_RT')
     parser.add_argument('--speed', type=float, default=1.0, help='Velocidad de reproducción (1.0 = tiempo real)')
     
     args = parser.parse_args()
     
+    # Si hay archivo hardcodeado, usarlo
+    # if 'MINISEED_FILE' in locals():
+    #     args.miniseed_file = MINISEED_FILE
+    
     # Validar archivo
+    if not args.miniseed_file:
+        logging.error("Debe especificar un archivo MiniSEED")
+        logging.info("Uso: python CREIME_RT_Simulator.py archivo.mseed")
+        return
+        
     if not os.path.exists(args.miniseed_file):
         logging.error(f"Archivo no encontrado: {args.miniseed_file}")
         return
