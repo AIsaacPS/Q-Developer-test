@@ -365,12 +365,12 @@ class RealTimeVisualizer:
 class UltraFastBuffer:
     """Buffer ultra-rápido para simulador MiniSEED"""
     
-    def __init__(self, window_size=1000, sampling_rate=100, update_interval=0.1):
+    def __init__(self, window_size=3000, sampling_rate=100, update_interval=0.1):
         self.window_size = int(window_size)
         self.sampling_rate = int(sampling_rate)
         self.update_interval = update_interval
         
-        total_size = self.window_size + 200
+        total_size = self.window_size + 500  # Buffer para 35 segundos
         self.buffers = {
             'ENZ': deque(maxlen=total_size),
             'ENE': deque(maxlen=total_size),
@@ -381,7 +381,7 @@ class UltraFastBuffer:
         self.window_count = 0
         self.last_window_time = 0
         self.ready = False
-        self.min_ready_samples = int(0.5 * sampling_rate)
+        self.min_ready_samples = int(30 * sampling_rate)  # 30 segundos mínimos
         self.new_data_event = threading.Event()
         
         self.performance_stats = {
@@ -572,7 +572,11 @@ class UltraFastProcessingPipeline:
                 try:
                     y_pred, predictions = model.predict(window_data)
                     
-                    raw_output = float(y_pred[0][0]) if y_pred is not None and len(y_pred) > 0 else -4.0
+                    # Usar el valor máximo del vector completo (6000 muestras)
+                    if y_pred is not None and len(y_pred.shape) > 1:
+                        raw_output = float(np.max(y_pred[0]))  # Máximo del vector completo
+                    else:
+                        raw_output = -4.0
                     
                     if raw_output > -0.5:
                         detection = 1
@@ -651,12 +655,12 @@ class MiniSeedSimulator:
         self.playback_speed = playback_speed  # 1.0 = tiempo real, 2.0 = 2x velocidad
         
         # Parámetros según documentación oficial CREIME_RT
-        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)  # 1000 muestras - 10 segundos
+        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
         self.detection_threshold = -0.5  # Umbral oficial documentación
         self.noise_baseline = -4.0
-        self.magnitude_threshold = 0.1  # Sensible para diagnóstico
-        self.consecutive_windows = 5  # 5 ventanas según documentación
+        self.magnitude_threshold = 1.0  # Ajustado según análisis (máximo 1.6)
+        self.consecutive_windows = 3  # Reducido para detección más rápida
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
