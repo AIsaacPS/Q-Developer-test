@@ -633,10 +633,10 @@ class MiniSeedSimulator:
         # Parámetros según documentación oficial CREIME_RT
         self.window_size = 10 * sampling_rate  # 1000 muestras - 10 segundos
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
-        self.detection_threshold = -0.5
+        self.detection_threshold = -1.5  # Más sensible que -0.5
         self.noise_baseline = -4.0
-        self.magnitude_threshold = 0.6
-        self.consecutive_windows = 5
+        self.magnitude_threshold = 0.3  # Más sensible que 0.6
+        self.consecutive_windows = 3  # Menos restrictivo que 5
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
@@ -768,7 +768,7 @@ class MiniSeedSimulator:
         
         # Obtener longitud mínima
         total_samples = min(len(tr.data) for tr in self.stream_data.values())
-        samples_per_packet = 10  # 10 muestras por paquete (0.1 segundos)
+        samples_per_packet = 50  # 50 muestras por paquete (0.5 segundos) - más eficiente
         
         sample_index = 0
         packet_interval = (samples_per_packet / self.sampling_rate) / self.playback_speed
@@ -785,12 +785,28 @@ class MiniSeedSimulator:
                         tr = self.stream_data[component]
                         packet_data = tr.data[sample_index:sample_index + samples_per_packet]
                         
-                        # Convertir a lista y mantener datos originales
-                        raw_data = packet_data.astype(np.float32).tolist()
+                        # Aplicar preprocesamiento según documentación CREIME_RT
+                        # 1. Filtrado [1.0, 45.0] Hz
+                        filtered_data = self.hybrid_filter.apply_filter(packet_data.tolist())
+                        
+                        # 2. Normalización z-score (por componente)
+                        if len(filtered_data) > 1:
+                            mean_val = np.mean(filtered_data)
+                            std_val = np.std(filtered_data)
+                            if std_val > 0:
+                                normalized_data = [(x - mean_val) / std_val for x in filtered_data]
+                            else:
+                                normalized_data = filtered_data
+                        else:
+                            normalized_data = filtered_data
+                        
+                        raw_data = normalized_data
                         
                         # Diagnóstico para primeros paquetes
                         if self.packet_count < 3:
-                            logging.info(f"Paquete {self.packet_count} {component}: {raw_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
+                            logging.info(f"Paquete {self.packet_count} {component}:")
+                            logging.info(f"  Original: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
+                            logging.info(f"  Procesado: {raw_data[:3]}... (rango: {np.min(raw_data):.6f} a {np.max(raw_data):.6f})")
                         
                         # Añadir al buffer con timestamp secuencial
                         current_time = time.time()
@@ -815,7 +831,7 @@ class MiniSeedSimulator:
                                 sample_data = self.stream_data[comp].data[sample_index:sample_index+5]
                                 logging.info(f"Muestra {comp}[{sample_index}:{sample_index+5}]: {sample_data}")
                     
-                    logging.info(f"Progreso: {progress:.1f}% - Sim: {elapsed:.1f}s - Real: {real_elapsed:.1f}s")
+                    logging.info(f"Progreso: {progress:.1f}% - Sim: {elapsed:.1f}s - Real: {real_elapsed:.1f}s - Velocidad: {elapsed/real_elapsed:.2f}x")
                 
                 # Esperar según velocidad de reproducción
                 time.sleep(packet_interval)
@@ -1011,11 +1027,13 @@ class MiniSeedSimulator:
                         
                         mag_display = f"{result['magnitude']:.1f}" if result['magnitude'] is not None else "N/A"
                         
-                        logging.info(
-                            f"Procesado {result['processing_id']}: {status} | "
-                            f"Mag: {mag_display} | Raw: {result['confidence']:.6f} | "
-                            f"Tiempo: {result['processing_time']:.3f}s"
-                        )
+                        # Logging más detallado para diagnóstico
+                        if result['processing_id'] % 50 == 0 or result['confidence'] > -2.0:
+                            logging.info(
+                                f"Procesado {result['processing_id']}: {status} | "
+                                f"Mag: {mag_display} | Raw: {result['confidence']:.6f} | "
+                                f"Tiempo: {result['processing_time']:.3f}s"
+                            )
                         
                         detection_info = self.evaluate_detection(result)
                         if detection_info:
