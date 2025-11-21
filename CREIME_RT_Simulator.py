@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -131,7 +131,7 @@ class RealTimeVisualizer:
             self.fig, self.axes = plt.subplots(3, 1, figsize=(16, 10), dpi=120)
             self.ax1, self.ax2, self.ax3 = self.axes
             
-            self.fig.suptitle('CREIME_RT SIMULATOR - Datos Filtrados [1.0-45.0 Hz]', 
+            self.fig.suptitle('CREIME_RT SIMULATOR - Datos Procesados CREIME_RT', 
                              fontsize=16, fontweight='bold')
             
             self.line_enz, = self.ax1.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENZ')
@@ -145,7 +145,7 @@ class RealTimeVisualizer:
             ]
             
             for ax, title, color in components_config:
-                ax.set_ylabel('Amplitud Filtrada', fontsize=12)
+                ax.set_ylabel('Amplitud Filtrada [1-45Hz]', fontsize=12)
                 ax.set_title(title, fontsize=14, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
@@ -434,7 +434,7 @@ class UltraFastBuffer:
                     start_idx = buf_len - self.window_size
                     component_data = [buf[i] for i in range(start_idx, buf_len)]
                 
-                # Aplicar normalización z-score a la ventana completa (10 segundos)
+                # Aplicar solo normalización z-score (datos ya vienen filtrados)
                 if len(component_data) > 1:
                     mean_val = np.mean(component_data)
                     std_val = np.std(component_data)
@@ -472,6 +472,19 @@ class UltraFastBuffer:
             status['min_required'] = f"{self.min_ready_samples} muestras ({self.min_ready_samples/self.sampling_rate:.1f}s)"
             
             return status
+    
+    def _apply_bandpass_filter(self, data):
+        """Aplica filtro pasa-banda [1.0, 45.0] Hz"""
+        try:
+            from scipy.signal import butter, filtfilt
+            fs = self.sampling_rate
+            nyquist = 0.5 * fs
+            low = 1.0 / nyquist
+            high = 45.0 / nyquist
+            b, a = butter(4, [low, high], btype='band')
+            return filtfilt(b, a, data).tolist()
+        except:
+            return data
 
 class OptimizedHybridFilter:
     """Filtro optimizado según documentación CREIME_RT"""
@@ -792,18 +805,27 @@ class MiniSeedSimulator:
                         tr = self.stream_data[component]
                         packet_data = tr.data[sample_index:sample_index + samples_per_packet]
                         
-                        # Aplicar solo filtrado, normalización z-score se hace globalmente
-                        filtered_data = self.hybrid_filter.apply_filter(packet_data.tolist())
+                        # Aplicar el mismo procesamiento que usará CREIME_RT
+                        # 1. Filtrado [1.0, 45.0] Hz
+                        try:
+                            from scipy.signal import butter, filtfilt
+                            fs = self.sampling_rate
+                            nyquist = 0.5 * fs
+                            low = 1.0 / nyquist
+                            high = 45.0 / nyquist
+                            b, a = butter(4, [low, high], btype='band')
+                            filtered_data = filtfilt(b, a, packet_data).tolist()
+                        except:
+                            filtered_data = packet_data.astype(np.float32).tolist()
                         
-                        # Los mismos datos filtrados para visualización y CREIME_RT
                         unified_data = filtered_data
                         
                         # Diagnóstico para primeros paquetes
                         if self.packet_count < 3:
                             logging.info(f"Paquete {self.packet_count} {component}:")
-                            logging.info(f"  Original MiniSEED: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
+                            logging.info(f"  MiniSEED Original: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
                             logging.info(f"  Filtrado [1-45Hz]: {unified_data[:3]}... (rango: {np.min(unified_data):.6f} a {np.max(unified_data):.6f})")
-                            logging.info(f"  Nota: Z-Score se aplica por ventana de 10s en CREIME_RT")
+                            logging.info(f"  Visualización = CREIME_RT (mismo procesamiento)")
                         
                         # Usar los mismos datos procesados para buffer y visualizador
                         current_time = time.time()
