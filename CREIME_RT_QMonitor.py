@@ -671,7 +671,9 @@ class TwoSecondLatencyDetector:
         self.window_size = 10 * sampling_rate  # 1000 muestras - 10 SEGUNDOS
         # PARÁMETROS OPTIMIZADOS PARA VELOCIDAD MÁXIMA
         self.latency_target = 0.1  # 300 ms entre procesamientos
-        self.confidence_threshold = 9.0  # Umbral de sensibilidad aumentado
+        self.anomaly_threshold = 0.9  # Umbral para detectar anomalías
+        self.seismic_threshold = 0.95  # Umbral para confirmar evento sísmico
+        self.magnitude_threshold = 0.6  # Magnitud mínima para confirmar sismo
         self.consecutive_windows = 1  # Una sola detección
         
         # Componentes ultra-rápidos
@@ -721,7 +723,9 @@ class TwoSecondLatencyDetector:
         logging.info("=== SISTEMA CONFIGURADO ===")
         logging.info(f"VENTANA EXTENDIDA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
         logging.info(f"LATENCIA OBJETIVO: {self.latency_target} segundos")
-        logging.info(f"CONFIANZA: {self.confidence_threshold}")
+        logging.info(f"UMBRAL ANOMALÍA: {self.anomaly_threshold}")
+        logging.info(f"UMBRAL SÍSMICO: {self.seismic_threshold}")
+        logging.info(f"MAGNITUD MÍNIMA: {self.magnitude_threshold}")
     
     def connect_to_observer(self):
         """Conexión rápida con AnyShake Observer"""
@@ -816,17 +820,21 @@ class TwoSecondLatencyDetector:
     def _calculate_confidence(self, result_data):
         """Calcula confianza ultra-rápida"""
         if result_data['result'][0] == 1:
-            return 9.8  # Confianza alta para anomalías detectadas
+            return 0.98  # Confianza alta para anomalías detectadas
         return 0.0
     
     def evaluate_detection(self, result):
-        """Evaluación ultra-rápida de detección"""
+        """Evaluación ultra-rápida con doble umbral"""
         if result and result['detection'] == 1:
-            if result['confidence'] >= self.confidence_threshold:
+            # Detectar anomalía si supera umbral de 0.9
+            if result['confidence'] >= self.anomaly_threshold:
                 self.detection_buffer.append(True)
                 
                 if len(self.detection_buffer) >= self.consecutive_windows:
-                    return True
+                    return {
+                        'type': 'anomaly',
+                        'is_seismic': self._is_seismic_event(result)
+                    }
             else:
                 self.detection_buffer.append(False)
         else:
@@ -834,28 +842,38 @@ class TwoSecondLatencyDetector:
         
         return False
     
-    def trigger_alert(self, detection_result):
-        """Activa alerta sísmica ULTRA-RÁPIDA"""
-        # Verificar criterios estrictos para sismo confirmado
-        if (detection_result['confidence'] >= 9.6 and 
-            detection_result['magnitude'] is not None and 
-            detection_result['magnitude'] >= 2.1):
-            
-            self.detection_count += 1
-            self.last_detection_time = detection_result['timestamp']
-            
+    def _is_seismic_event(self, result):
+        """Determina si la anomalía es un evento sísmico confirmado"""
+        return (result['confidence'] >= self.seismic_threshold and 
+                result['magnitude'] is not None and 
+                result['magnitude'] >= self.magnitude_threshold)
+    
+    def trigger_alert(self, detection_result, detection_info):
+        """Activa alerta según tipo de detección"""
+        self.detection_count += 1
+        self.last_detection_time = detection_result['timestamp']
+        
+        if detection_info['is_seismic']:
+            # Evento sísmico confirmado
             alert_message = (
-                f"🚨 ALERTA: SISMO CONFIRMADO 🚨 - "
-                f"Confianza: {detection_result['confidence']:.3f} | "
-                f"Magnitud: {detection_result['magnitude']:.1f} | "
-                f"Ventana: {detection_result['processing_id']}"
-                f"Latencia: {detection_result['processing_time']:.3f}s | "
+                f"🚨 ALERTA: SISMO CONFIRMADO 🚨\n"
+                f"Confianza: {detection_result['confidence']:.3f}\n"
+                f"Magnitud: {detection_result['magnitude']:.1f}\n"
+                f"Ventana: {detection_result['processing_id']}\n"
+                f"Latencia: {detection_result['processing_time']:.3f}s"
             )
-            
             logging.critical(alert_message)
             self.save_event_data(detection_result)
         else:
-            logging.info(f"Evento descartado - Confianza: {detection_result['confidence']:.3f}, Magnitud: {detection_result['magnitude']}")
+            # Solo anomalía detectada
+            alert_message = (
+                f"⚠️ ANOMALÍA DETECTADA ⚠️\n"
+                f"Confianza: {detection_result['confidence']:.3f}\n"
+                f"Magnitud: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
+                f"Ventana: {detection_result['processing_id']}\n"
+                f"Latencia: {detection_result['processing_time']:.3f}s"
+            )
+            logging.warning(alert_message)
     
     def save_event_data(self, detection_result):
         """Guarda JSON inmediatamente y programa MiniSEED para 60s después"""
@@ -953,8 +971,9 @@ class TwoSecondLatencyDetector:
                             f"Tiempo: {result['processing_time']:.3f}s"
                         )
                         
-                        if self.evaluate_detection(result):
-                            self.trigger_alert(result)
+                        detection_info = self.evaluate_detection(result)
+                        if detection_info:
+                            self.trigger_alert(result, detection_info)
                 
                 time.sleep(0.05)  # Sleep mínimo para reducir CPU
                 
@@ -1037,7 +1056,8 @@ class TwoSecondLatencyDetector:
         logging.info("INICIANDO SISTEMA")
         logging.info(f" Ventana: {self.window_size} muestras")
         logging.info(f" Latencia: {self.latency_target}s")
-        logging.info(f" Confianza: {self.confidence_threshold}")
+        logging.info(f" Umbral Anomalía: {self.anomaly_threshold}")
+        logging.info(f" Umbral Sísmico: {self.seismic_threshold}")
         logging.info(f" Estación: {self.station_id}")
         
         # Hilo de recepción
