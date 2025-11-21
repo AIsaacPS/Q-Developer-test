@@ -513,7 +513,7 @@ class UltraFastBuffer:
 class OptimizedHybridFilter:
     """Filtro optimizado para bajo consumo"""
     
-    def __init__(self, fs=100, hp_cutoff=0.09, lp_cutoff=45):
+    def __init__(self, fs=100, hp_cutoff=1.0, lp_cutoff=45):
         self.fs = fs
         nyquist = 0.5 * fs
         
@@ -595,24 +595,30 @@ class UltraFastProcessingPipeline:
                 
                 start_time = time.time()
                 
-                # Procesamiento directo
+                # Procesamiento según documentación oficial CREIME_RT
                 try:
                     y_pred, predictions = model.predict(window_data)
-                    if predictions:
-                        # Extraer detección, magnitud y probabilidad
-                        detection = predictions[0][0] if len(predictions[0]) > 0 else 0
-                        magnitude = predictions[0][1] if len(predictions[0]) > 1 else None
-                        # y_pred contiene las probabilidades del modelo
-                        probability = float(y_pred[0][0]) if y_pred is not None and len(y_pred) > 0 else 0.0
-                        result = (detection, magnitude, probability)
+                    
+                    # Según documentación: y_pred contiene el valor crudo de detección/magnitud
+                    raw_output = float(y_pred[0][0]) if y_pred is not None and len(y_pred) > 0 else -4.0
+                    
+                    # Interpretación según documentación:
+                    # -4: ruido, > -0.5: evento, valor positivo: magnitud
+                    if raw_output > -0.5:
+                        detection = 1
+                        magnitude = max(raw_output, 0.0) if raw_output > 0 else None
                     else:
-                        result = (0, None, 0.0)
+                        detection = 0
+                        magnitude = None
+                    
+                    result = (detection, magnitude, raw_output)
+                    
                 except (IndexError, ValueError, TypeError) as e:
-                    logging.warning(f"Error en predicción del modelo: {e}")
-                    result = (0, None, 0.0)
+                    logging.warning(f"Error en predicción CREIME_RT: {e}")
+                    result = (0, None, -4.0)
                 except Exception as e:
-                    logging.error(f"Error inesperado en predicción: {e}")
-                    result = (0, None, 0.0)
+                    logging.error(f"Error inesperado en CREIME_RT: {e}")
+                    result = (0, None, -4.0)
                 
                 processing_time = time.time() - start_time
                 
@@ -677,12 +683,12 @@ class TwoSecondLatencyDetector:
         
         # CONFIGURACIÓN ULTRA-RÁPIDA - VENTANA EXTENDIDA
         self.window_size = 10 * sampling_rate  # 1000 muestras - 10 SEGUNDOS
-        # PARÁMETROS OPTIMIZADOS PARA VELOCIDAD MÁXIMA
-        self.latency_target = 0.1  # 300 ms entre procesamientos
-        self.anomaly_threshold = 0.9  # Umbral para detectar anomalías
-        self.seismic_threshold = 0.95  # Umbral para confirmar evento sísmico
+        # PARÁMETROS SEGÚN DOCUMENTACIÓN OFICIAL CREIME_RT
+        self.latency_target = 0.1  # 100 ms entre procesamientos (0.1s según doc)
+        self.detection_threshold = -0.5  # Umbral oficial CREIME_RT para detección
+        self.noise_baseline = -4.0  # Valor de ruido según documentación
         self.magnitude_threshold = 0.6  # Magnitud mínima para confirmar sismo
-        self.consecutive_windows = 1  # Una sola detección
+        self.consecutive_windows = 5  # 5 ventanas consecutivas según documentación
         
         # Componentes ultra-rápidos
         self.buffer = UltraFastBuffer(
@@ -711,7 +717,7 @@ class TwoSecondLatencyDetector:
         
         # Control de procesamiento
         self.last_processing_time = 0
-        self.detection_buffer = deque(maxlen=3)
+        self.detection_buffer = deque(maxlen=self.consecutive_windows)  # Buffer para 5 ventanas
         
         # Configuración de estación
         self.station_id = "SKYALERT_ORIN_NANO"
@@ -731,9 +737,10 @@ class TwoSecondLatencyDetector:
         logging.info("=== SISTEMA CONFIGURADO ===")
         logging.info(f"VENTANA EXTENDIDA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
         logging.info(f"LATENCIA OBJETIVO: {self.latency_target} segundos")
-        logging.info(f"UMBRAL ANOMALÍA: {self.anomaly_threshold}")
-        logging.info(f"UMBRAL SÍSMICO: {self.seismic_threshold}")
+        logging.info(f"UMBRAL DETECCIÓN: {self.detection_threshold} (oficial CREIME_RT)")
+        logging.info(f"LÍNEA BASE RUIDO: {self.noise_baseline}")
         logging.info(f"MAGNITUD MÍNIMA: {self.magnitude_threshold}")
+        logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows} (según documentación)")
     
     def connect_to_observer(self):
         """Conexión rápida con AnyShake Observer"""
@@ -826,74 +833,84 @@ class TwoSecondLatencyDetector:
         return None
     
     def _calculate_confidence(self, result_data):
-        """Extrae la probabilidad real del modelo CREIME_RT"""
+        """Interpreta salida cruda de CREIME_RT según documentación oficial"""
         try:
-            # Usar la probabilidad real del modelo (tercer elemento)
+            # Extraer valor crudo del modelo (y_pred)
             if len(result_data['result']) >= 3:
-                probability = float(result_data['result'][2])
-                # Imprimir probabilidad en cada inferencia
-                logging.info(f"CREIME_RT Probabilidad: {probability:.6f}")
-                return probability
+                raw_output = float(result_data['result'][2])
             else:
-                # Fallback si no hay probabilidad disponible
-                if result_data['result'][0] == 1:
-                    logging.info("CREIME_RT Probabilidad: 0.980000 (fallback)")
-                    return 0.98
-                else:
-                    logging.info("CREIME_RT Probabilidad: 0.000000 (no detección)")
-                    return 0.0
+                raw_output = self.noise_baseline  # -4.0 por defecto
+            
+            # Imprimir valor crudo en cada inferencia
+            logging.info(f"CREIME_RT Raw Output: {raw_output:.6f}")
+            
+            # Retornar valor crudo para usar con umbral oficial (-0.5)
+            return raw_output
+            
         except (IndexError, TypeError, ValueError) as e:
-            logging.warning(f"Error extrayendo probabilidad: {e}")
-            logging.info("CREIME_RT Probabilidad: 0.000000 (error)")
-            return 0.0
+            logging.warning(f"Error extrayendo salida CREIME_RT: {e}")
+            logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
+            return self.noise_baseline
     
     def evaluate_detection(self, result):
-        """Evaluación ultra-rápida con doble umbral"""
-        if result and result['detection'] == 1:
-            # Detectar anomalía si supera umbral de 0.9
-            if result['confidence'] >= self.anomaly_threshold:
+        """Evaluación según documentación oficial CREIME_RT"""
+        if result:
+            # Usar umbral oficial -0.5 para detección de eventos
+            if result['confidence'] > self.detection_threshold:  # > -0.5
                 self.detection_buffer.append(True)
-                
-                if len(self.detection_buffer) >= self.consecutive_windows:
-                    return {
-                        'type': 'anomaly',
-                        'is_seismic': self._is_seismic_event(result)
-                    }
+                logging.debug(f"Ventana detectada como evento: {result['confidence']:.6f} > {self.detection_threshold}")
             else:
                 self.detection_buffer.append(False)
+                logging.debug(f"Ventana detectada como ruido: {result['confidence']:.6f} <= {self.detection_threshold}")
+            
+            # Verificar 5 ventanas consecutivas según documentación
+            if len(self.detection_buffer) >= self.consecutive_windows:
+                recent_detections = list(self.detection_buffer)[-self.consecutive_windows:]
+                consecutive_count = sum(recent_detections)
+                
+                if consecutive_count >= self.consecutive_windows:
+                    logging.info(f"TRIGGER: {consecutive_count}/{self.consecutive_windows} ventanas consecutivas detectadas")
+                    return {
+                        'type': 'event_confirmed',
+                        'consecutive_detections': consecutive_count,
+                        'is_seismic': self._is_seismic_event(result)
+                    }
         else:
             self.detection_buffer.append(False)
         
         return False
     
     def _is_seismic_event(self, result):
-        """Determina si la anomalía es un evento sísmico confirmado"""
-        return (result['confidence'] >= self.seismic_threshold and 
+        """Determina si es evento sísmico significativo"""
+        # Si el valor crudo es positivo, puede representar magnitud
+        return (result['confidence'] > 0.0 and 
                 result['magnitude'] is not None and 
                 result['magnitude'] >= self.magnitude_threshold)
     
     def trigger_alert(self, detection_result, detection_info):
-        """Activa alerta según tipo de detección"""
+        """Activa alerta según protocolo oficial CREIME_RT"""
         self.detection_count += 1
         self.last_detection_time = detection_result['timestamp']
         
         if detection_info['is_seismic']:
-            # Evento sísmico confirmado
+            # Evento sísmico confirmado (magnitud significativa)
             alert_message = (
                 f"🚨 ALERTA: SISMO CONFIRMADO 🚨\n"
-                f"Confianza: {detection_result['confidence']:.6f}\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
                 f"Magnitud: {detection_result['magnitude']:.1f}\n"
+                f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
             )
             logging.critical(alert_message)
             self.save_event_data(detection_result)
         else:
-            # Solo anomalía detectada
+            # Evento detectado pero sin magnitud significativa
             alert_message = (
-                f"⚠️ ANOMALÍA DETECTADA ⚠️\n"
-                f"Confianza: {detection_result['confidence']:.6f}\n"
+                f"⚠️ EVENTO DETECTADO ⚠️\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
                 f"Magnitud: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
+                f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
             )
@@ -986,12 +1003,19 @@ class TwoSecondLatencyDetector:
                     result = self.ultra_fast_processing()
                     
                     if result:
-                        status = " ANOMALÍA_DETECTADA" if result['detection'] == 1 else " NO_DETECTADO"
+                        # Interpretar según documentación oficial
+                        if result['confidence'] > self.detection_threshold:
+                            status = " EVENTO_DETECTADO"
+                        elif result['confidence'] <= self.noise_baseline:
+                            status = " RUIDO_PURO"
+                        else:
+                            status = " SEÑAL_MIXTA"
+                        
                         mag_display = f"{result['magnitude']:.1f}" if result['magnitude'] is not None else "N/A"
                         
                         logging.info(
                             f"Procesado {result['processing_id']}: {status} | "
-                            f"Mag: {mag_display} | Conf: {result['confidence']:.6f} | "
+                            f"Mag: {mag_display} | Raw: {result['confidence']:.6f} | "
                             f"Tiempo: {result['processing_time']:.3f}s"
                         )
                         
@@ -1080,8 +1104,9 @@ class TwoSecondLatencyDetector:
         logging.info("INICIANDO SISTEMA")
         logging.info(f" Ventana: {self.window_size} muestras")
         logging.info(f" Latencia: {self.latency_target}s")
-        logging.info(f" Umbral Anomalía: {self.anomaly_threshold}")
-        logging.info(f" Umbral Sísmico: {self.seismic_threshold}")
+        logging.info(f" Umbral Detección: {self.detection_threshold} (oficial CREIME_RT)")
+        logging.info(f" Ventanas Consecutivas: {self.consecutive_windows}")
+        logging.info(f" Filtro: [1.0, 45.0] Hz (según documentación)")
         logging.info(f" Estación: {self.station_id}")
         
         # Hilo de recepción
