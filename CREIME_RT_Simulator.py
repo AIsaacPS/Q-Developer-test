@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -96,6 +96,7 @@ class RealTimeVisualizer:
         
         # Marcadores de ventana CREIME_RT
         self.creime_markers = []
+        self.processing_window_markers = []
         
         # Historial de máximos para ajuste suave
         self.max_values_history = {
@@ -157,6 +158,9 @@ class RealTimeVisualizer:
                                           fontsize=10, verticalalignment='top', color=COLOR_ORANGE,
                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
+            # Configurar marcadores de ventana de procesamiento
+            self.setup_processing_markers()
+            
             plt.tight_layout(rect=[0, 0, 1, 0.96])
             logging.info("Visualizador del simulador configurado correctamente")
             
@@ -164,23 +168,56 @@ class RealTimeVisualizer:
             logging.error(f"Error configurando visualización: {e}")
             self.visualization_enabled = False
     
+    def setup_processing_markers(self):
+        """Configura marcadores de ventana de procesamiento CREIME_RT"""
+        if not self.visualization_enabled:
+            return
+            
+        try:
+            for ax in [self.ax1, self.ax2, self.ax3]:
+                if ax is None:
+                    continue
+                # Línea vertical para marcar ventana actual de procesamiento
+                window_line = ax.axvline(x=0, color=COLOR_GREEN, linestyle='-', 
+                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (10s)')
+                # Área sombreada para ventana de procesamiento
+                window_fill = ax.axvspan(0, 10, color=COLOR_GREEN, alpha=0.15)
+                
+                self.processing_window_markers.append({
+                    'line': window_line,
+                    'fill': window_fill
+                })
+            
+            # Agregar leyenda solo en el primer subplot
+            self.ax1.legend(loc='upper left', fontsize=9)
+            
+        except Exception as e:
+            logging.error(f"Error configurando marcadores de procesamiento: {e}")
+    
     def calculate_dynamic_ylimits(self, data, component_name):
-        """Algoritmo para escalado dinámico"""
+        """Algoritmo mejorado para escalado dinámico con mejor resolución"""
         if len(data) == 0:
             return -1, 1
         
-        current_max = np.max(np.abs(data))
-        self.max_values_history[component_name].append(current_max)
+        # Usar percentiles para mejor escalado
+        p95 = np.percentile(np.abs(data), 95)
+        p99 = np.percentile(np.abs(data), 99)
+        
+        self.max_values_history[component_name].append(p95)
         
         if len(self.max_values_history[component_name]) > 0:
-            historical_max = np.percentile(list(self.max_values_history[component_name]), 90)
-            target_max = max(current_max, historical_max)
+            # Usar percentil 75 del historial para estabilidad
+            historical_max = np.percentile(list(self.max_values_history[component_name]), 75)
+            target_max = max(p99, historical_max)
         else:
-            target_max = current_max
+            target_max = p99
         
-        margin = 1.25
+        # Margen más ajustado para mejor resolución
+        margin = 1.1
         limit = target_max * margin
-        min_limit = 0.1
+        
+        # Límite mínimo más pequeño para señales débiles
+        min_limit = max(0.01, target_max * 0.1)
         
         if limit < min_limit:
             limit = min_limit
@@ -221,7 +258,10 @@ class RealTimeVisualizer:
         
         min_len = min(len(times_copy), len(enz_copy), len(ene_copy), len(enn_copy))
         if min_len < 10:
-            return [self.line_enz, self.line_ene, self.line_enn, self.info_text]
+            artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
+            for markers in self.processing_window_markers:
+                artists.extend([markers['line'], markers['fill']])
+            return artists
         
         times_trim = times_copy[-min_len:]
         enz_trim = enz_copy[-min_len:]
@@ -247,6 +287,9 @@ class RealTimeVisualizer:
         self.ax2.set_ylim(ylim_ene)
         self.ax3.set_ylim(ylim_enn)
         
+        # Actualizar marcadores de ventana de procesamiento
+        self.update_processing_markers(rel_times)
+        
         current_time_str = datetime.now().strftime('%H:%M:%S')
         run_time = time.time() - self.start_time
         packets_per_sec = self.packet_count / run_time if run_time > 0 else 0
@@ -264,7 +307,36 @@ class RealTimeVisualizer:
         
         self.info_text.set_text(info_text)
         
-        return [self.line_enz, self.line_ene, self.line_enn, self.info_text]
+        artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
+        for markers in self.processing_window_markers:
+            artists.extend([markers['line'], markers['fill']])
+        return artists
+    
+    def update_processing_markers(self, rel_times):
+        """Actualiza marcadores de ventana de procesamiento CREIME_RT"""
+        if not self.processing_window_markers or len(rel_times) == 0:
+            return
+            
+        try:
+            # La ventana de procesamiento son los últimos 10 segundos
+            window_start = 10  # 10 segundos atrás
+            window_end = 0     # Tiempo actual
+            
+            for markers in self.processing_window_markers:
+                # Actualizar línea de ventana actual
+                markers['line'].set_xdata([window_end, window_end])
+                
+                # Actualizar área sombreada de ventana
+                try:
+                    markers['fill'].remove()
+                    ax = markers['line'].axes
+                    markers['fill'] = ax.axvspan(window_start, window_end, 
+                                                color=COLOR_GREEN, alpha=0.15)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logging.debug(f"Error actualizando marcadores: {e}")
     
     def start_visualization(self):
         """Inicia visualización"""
@@ -593,6 +665,12 @@ class MiniSeedSimulator:
         # Configuración de estación
         self.station_id = "CREIME_RT_SIMULATOR"
         
+        # Rastreo de eventos y timestamps
+        self.detected_events = []
+        self.miniseed_start_time = None
+        self.miniseed_duration = 0
+        self.simulation_start_time = None
+        
         # Hilos
         self.data_thread = None
         self.processing_thread = None
@@ -656,6 +734,11 @@ class MiniSeedSimulator:
             total_samples = min(len(tr.data) for tr in channel_mapping.values())
             duration = total_samples / self.sampling_rate
             
+            # Capturar tiempo de inicio del MiniSEED
+            first_trace = list(channel_mapping.values())[0]
+            self.miniseed_start_time = first_trace.stats.starttime
+            self.miniseed_duration = duration
+            
             logging.info(f"✅ MiniSEED cargado exitosamente:")
             logging.info(f"   Duración: {duration:.1f} segundos ({total_samples} muestras)")
             logging.info(f"   Componentes: {list(channel_mapping.keys())}")
@@ -690,6 +773,7 @@ class MiniSeedSimulator:
         sample_index = 0
         packet_interval = (samples_per_packet / self.sampling_rate) / self.playback_speed
         start_simulation_time = time.time()
+        self.simulation_start_time = start_simulation_time
         
         logging.info(f"Iniciando simulación: {total_samples} muestras, intervalo {packet_interval:.4f}s")
         
@@ -828,6 +912,13 @@ class MiniSeedSimulator:
         self.detection_count += 1
         self.last_detection_time = detection_result['timestamp']
         
+        # Calcular tiempo real del evento en el MiniSEED
+        if self.miniseed_start_time and self.simulation_start_time:
+            elapsed_simulation = time.time() - self.simulation_start_time
+            miniseed_event_time = self.miniseed_start_time + elapsed_simulation
+        else:
+            miniseed_event_time = detection_result['timestamp']
+        
         if detection_info['is_seismic']:
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
@@ -838,6 +929,17 @@ class MiniSeedSimulator:
                 f"Latencia: {detection_result['processing_time']:.3f}s"
             )
             logging.critical(alert_message)
+            
+            # Registrar evento detectado
+            self.detected_events.append({
+                'type': 'seismic',
+                'miniseed_time': miniseed_event_time,
+                'simulation_time': detection_result['timestamp'],
+                'confidence': detection_result['confidence'],
+                'magnitude': detection_result['magnitude'],
+                'processing_id': detection_result['processing_id']
+            })
+            
             self.save_event_data(detection_result)
         else:
             alert_message = (
@@ -849,6 +951,16 @@ class MiniSeedSimulator:
                 f"Latencia: {detection_result['processing_time']:.3f}s"
             )
             logging.warning(alert_message)
+            
+            # Registrar evento detectado
+            self.detected_events.append({
+                'type': 'event',
+                'miniseed_time': miniseed_event_time,
+                'simulation_time': detection_result['timestamp'],
+                'confidence': detection_result['confidence'],
+                'magnitude': detection_result['magnitude'],
+                'processing_id': detection_result['processing_id']
+            })
     
     def save_event_data(self, detection_result):
         """Guarda datos del evento detectado en simulador"""
@@ -927,6 +1039,8 @@ class MiniSeedSimulator:
         logging.info(f" Velocidad: {self.playback_speed}x")
         logging.info(f" Umbral Detección: {self.detection_threshold}")
         logging.info(f" Ventanas Consecutivas: {self.consecutive_windows}")
+        if self.miniseed_start_time:
+            logging.info(f" Tiempo inicio MiniSEED: {self.miniseed_start_time}")
         
         self.running = True
         
@@ -980,15 +1094,38 @@ class MiniSeedSimulator:
             run_time = time.time() - self.start_time
             processing_rate = self.processing_count / run_time if run_time > 0 else 0
             
-            logging.info(
-                f"\n=== REPORTE FINAL SIMULADOR ==="
-                f"Tiempo total: {run_time:.1f}s"
-                f"Paquetes: {self.packet_count}"
-                f"Procesamientos: {self.processing_count}"
-                f"Tasa: {processing_rate:.2f} ventanas/segundo"
-                f"Detecciones: {self.detection_count}"
-                f"Última detección: {self.last_detection_time}"
-            )
+            logging.info(f"\n{'='*60}")
+            logging.info(f"REPORTE FINAL - SIMULADOR CREIME_RT")
+            logging.info(f"{'='*60}")
+            logging.info(f"Archivo MiniSEED:")
+            logging.info(f"  Duración: {self.miniseed_duration:.1f} segundos")
+            if self.miniseed_start_time:
+                logging.info(f"  Inicio: {self.miniseed_start_time}")
+            logging.info(f"")
+            logging.info(f"Rendimiento del Sistema:")
+            logging.info(f"  Tiempo procesamiento: {run_time:.1f} segundos")
+            logging.info(f"  Velocidad: {self.miniseed_duration/run_time:.2f}x tiempo real")
+            logging.info(f"  Paquetes procesados: {self.packet_count}")
+            logging.info(f"  Ventanas CREIME_RT: {self.processing_count}")
+            logging.info(f"  Tasa procesamiento: {processing_rate:.2f} ventanas/segundo")
+            logging.info(f"")
+            logging.info(f"Eventos Detectados: {len(self.detected_events)}")
+            
+            if self.detected_events:
+                logging.info(f"Detalle de Eventos:")
+                for i, event in enumerate(self.detected_events, 1):
+                    event_type = "SÍSMICO" if event['type'] == 'seismic' else "EVENTO"
+                    logging.info(f"  {i}. {event_type}:")
+                    logging.info(f"     Tiempo MiniSEED: {event['miniseed_time']}")
+                    logging.info(f"     Confianza: {event['confidence']:.6f}")
+                    logging.info(f"     Magnitud: {event['magnitude']:.1f if event['magnitude'] else 'N/A'}")
+                    logging.info(f"     Ventana: {event['processing_id']}")
+            else:
+                logging.info(f"  No se detectaron eventos sísmicos")
+                logging.info(f"  Verifique que el archivo contenga actividad sísmica")
+                logging.info(f"  o ajuste los umbrales de detección")
+            
+            logging.info(f"{'='*60}")
 
 def main():
     """Función principal del simulador"""
