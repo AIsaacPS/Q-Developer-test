@@ -22,7 +22,7 @@ import sys
 import subprocess
 import uuid
 from obspy import Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -598,13 +598,21 @@ class UltraFastProcessingPipeline:
                 # Procesamiento directo
                 try:
                     y_pred, predictions = model.predict(window_data)
-                    result = predictions[0] if predictions else (0, None)
+                    if predictions:
+                        # Extraer detección, magnitud y probabilidad
+                        detection = predictions[0][0] if len(predictions[0]) > 0 else 0
+                        magnitude = predictions[0][1] if len(predictions[0]) > 1 else None
+                        # y_pred contiene las probabilidades del modelo
+                        probability = float(y_pred[0][0]) if y_pred is not None and len(y_pred) > 0 else 0.0
+                        result = (detection, magnitude, probability)
+                    else:
+                        result = (0, None, 0.0)
                 except (IndexError, ValueError, TypeError) as e:
                     logging.warning(f"Error en predicción del modelo: {e}")
-                    result = (0, None)
+                    result = (0, None, 0.0)
                 except Exception as e:
                     logging.error(f"Error inesperado en predicción: {e}")
-                    result = (0, None)
+                    result = (0, None, 0.0)
                 
                 processing_time = time.time() - start_time
                 
@@ -818,10 +826,26 @@ class TwoSecondLatencyDetector:
         return None
     
     def _calculate_confidence(self, result_data):
-        """Calcula confianza ultra-rápida"""
-        if result_data['result'][0] == 1:
-            return 0.98  # Confianza alta para anomalías detectadas
-        return 0.0
+        """Extrae la probabilidad real del modelo CREIME_RT"""
+        try:
+            # Usar la probabilidad real del modelo (tercer elemento)
+            if len(result_data['result']) >= 3:
+                probability = float(result_data['result'][2])
+                # Imprimir probabilidad en cada inferencia
+                logging.info(f"CREIME_RT Probabilidad: {probability:.6f}")
+                return probability
+            else:
+                # Fallback si no hay probabilidad disponible
+                if result_data['result'][0] == 1:
+                    logging.info("CREIME_RT Probabilidad: 0.980000 (fallback)")
+                    return 0.98
+                else:
+                    logging.info("CREIME_RT Probabilidad: 0.000000 (no detección)")
+                    return 0.0
+        except (IndexError, TypeError, ValueError) as e:
+            logging.warning(f"Error extrayendo probabilidad: {e}")
+            logging.info("CREIME_RT Probabilidad: 0.000000 (error)")
+            return 0.0
     
     def evaluate_detection(self, result):
         """Evaluación ultra-rápida con doble umbral"""
@@ -857,7 +881,7 @@ class TwoSecondLatencyDetector:
             # Evento sísmico confirmado
             alert_message = (
                 f"🚨 ALERTA: SISMO CONFIRMADO 🚨\n"
-                f"Confianza: {detection_result['confidence']:.3f}\n"
+                f"Confianza: {detection_result['confidence']:.6f}\n"
                 f"Magnitud: {detection_result['magnitude']:.1f}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
@@ -868,7 +892,7 @@ class TwoSecondLatencyDetector:
             # Solo anomalía detectada
             alert_message = (
                 f"⚠️ ANOMALÍA DETECTADA ⚠️\n"
-                f"Confianza: {detection_result['confidence']:.3f}\n"
+                f"Confianza: {detection_result['confidence']:.6f}\n"
                 f"Magnitud: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
@@ -967,7 +991,7 @@ class TwoSecondLatencyDetector:
                         
                         logging.info(
                             f"Procesado {result['processing_id']}: {status} | "
-                            f"Mag: {mag_display} | Conf: {result['confidence']:.3f} | "
+                            f"Mag: {mag_display} | Conf: {result['confidence']:.6f} | "
                             f"Tiempo: {result['processing_time']:.3f}s"
                         )
                         
