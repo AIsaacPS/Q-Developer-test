@@ -58,7 +58,7 @@ except Exception as e:
     logging.warning(f"Error configurando matplotlib: {e} - visualización desactivada")
 
 # Constantes de visualización
-DISPLAY_SECONDS = 30
+DISPLAY_SECONDS = 60
 SAMPLING_RATE = 100
 MAX_VISUALIZATION_SAMPLES = DISPLAY_SECONDS * SAMPLING_RATE
 
@@ -695,6 +695,10 @@ class MiniSeedSimulator:
         self.miniseed_duration = 0
         self.simulation_start_time = None
         
+        # Rastreo de tiempos de detección
+        self.first_detection_time = None  # Primer evento detectado
+        self.first_confirmation_time = None  # Primera confirmación de sismo
+        
         # Rastreo de valores CREIME_RT para diagnóstico
         self.creime_values = []
         
@@ -961,7 +965,15 @@ class MiniSeedSimulator:
         else:
             miniseed_event_time = detection_result['timestamp']
         
+        # Registrar primera detección
+        if self.first_detection_time is None:
+            self.first_detection_time = miniseed_event_time
+        
         if detection_info['is_seismic']:
+            # Registrar primera confirmación de sismo
+            if self.first_confirmation_time is None:
+                self.first_confirmation_time = miniseed_event_time
+            
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
                 f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
@@ -1163,6 +1175,12 @@ class MiniSeedSimulator:
             logging.info(f"  Tasa procesamiento: {processing_rate:.2f} ventanas/segundo")
             logging.info(f"")
             logging.info(f"Eventos Detectados: {len(self.detected_events)}")
+            
+            # Tiempos de detección en MiniSEED
+            if self.first_detection_time:
+                logging.info(f"Primera Detección (MiniSEED): {self.first_detection_time}")
+            if self.first_confirmation_time:
+                logging.info(f"Primera Confirmación (MiniSEED): {self.first_confirmation_time}")
             
             # Estadísticas de valores CREIME_RT para diagnóstico
             if hasattr(self, 'creime_values') and self.creime_values:
