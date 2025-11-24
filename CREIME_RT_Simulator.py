@@ -1011,10 +1011,11 @@ class MiniSeedSimulator:
             
             self.save_event_data(detection_result)
         else:
+            mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
                 f"⚠️ SIMULADOR: EVENTO DETECTADO ⚠️\n"
                 f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
-                f"Magnitud: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
+                f"Magnitud: {mag_display}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
