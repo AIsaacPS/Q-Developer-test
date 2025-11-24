@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -938,9 +938,9 @@ class MiniSeedSimulator:
                 samples_processed = self.packet_count * 10  # 10 muestras por paquete
                 file_elapsed = samples_processed / self.sampling_rate
                 miniseed_time = self.miniseed_start_time + file_elapsed
-                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {raw_output:.6f}")
+                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {raw_output:.2f}")
             else:
-                logging.info(f"CREIME_RT Raw Output: {raw_output:.6f}")
+                logging.info(f"CREIME_RT Raw Output: {raw_output:.2f}")
             
             return raw_output
             
@@ -950,9 +950,9 @@ class MiniSeedSimulator:
                 samples_processed = self.packet_count * 10
                 file_elapsed = samples_processed / self.sampling_rate
                 miniseed_time = self.miniseed_start_time + file_elapsed
-                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
+                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {self.noise_baseline:.2f} (error)")
             else:
-                logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
+                logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.2f} (error)")
             return self.noise_baseline
     
     def evaluate_detection(self, result):
@@ -1028,7 +1028,7 @@ class MiniSeedSimulator:
             
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
-                f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
                 f"Magnitud Original: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
                 f"Magnitud Corregida: {corrected_magnitude:.1f}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
@@ -1053,7 +1053,7 @@ class MiniSeedSimulator:
             mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
                 f"⚠️ SIMULADOR: EVENTO DETECTADO ⚠️\n"
-                f"Salida CREIME_RT: {detection_result['confidence']:.6f}\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
                 f"Magnitud: {mag_display}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
