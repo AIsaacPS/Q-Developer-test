@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -225,24 +225,17 @@ class RealTimeVisualizer:
         return -limit, limit
     
     def update_data(self, component, data, timestamp):
-        """Actualización de datos para visualización sincronizada con MiniSEED"""
+        """Actualización de datos para visualización"""
         if not self.visualization_enabled:
             return
             
-        # Usar timestamp MiniSEED si está disponible
-        if hasattr(self.detector, 'miniseed_start_time') and self.detector.miniseed_start_time:
-            samples_processed = self.detector.packet_count * 10
-            file_elapsed = samples_processed / SAMPLING_RATE
-            miniseed_time = self.detector.miniseed_start_time.timestamp + file_elapsed
-            base_time = miniseed_time
-        else:
-            base_time = time.time()
+        current_time = time.time()
         
         with self.lock:
             self.packet_count += 1
             
             for i, value in enumerate(data):
-                sample_time = base_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
+                sample_time = current_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
                 
                 if component == 'ENZ':
                     self.times.append(sample_time)
@@ -585,7 +578,7 @@ class UltraFastProcessingPipeline:
                     else:
                         raw_output = -4.0
                     
-                    if raw_output > -1.80:
+                    if raw_output > -2.6:
                         detection = 1
                         magnitude = max(raw_output, 0.0) if raw_output > 0 else None
                     else:
@@ -664,7 +657,7 @@ class MiniSeedSimulator:
         # Parámetros según documentación oficial CREIME_RT
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
-        self.detection_threshold = -1.80  # Nuevo umbral de detección
+        self.detection_threshold = -2.6  # Nuevo umbral de detección
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80  # Umbral para ruido alto
         self.magnitude_threshold = 1.0  # Ajustado según análisis (máximo 1.6)
