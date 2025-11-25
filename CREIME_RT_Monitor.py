@@ -20,7 +20,7 @@ import json
 import sys
 import uuid
 from obspy import Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -45,12 +45,12 @@ logging.basicConfig(
 # ===== CONFIGURACIÓN DE VISUALIZACIÓN =====
 VISUALIZATION_ENABLED = True
 try:
+    import matplotlib
+    matplotlib.use('TkAgg')  # Backend interactivo seguro
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
     from matplotlib import style
     style.use('fivethirtyeight')
-    plt.figure()
-    plt.close()
 except ImportError:
     VISUALIZATION_ENABLED = False
     logging.warning("Matplotlib no disponible - visualización desactivada")
@@ -249,7 +249,7 @@ class RealTimeVisualizer:
     def update_plot(self, frame):
         """Actualización de gráficos"""
         if not self.visualization_enabled or not self.fig:
-            return [self.line_enz, self.line_ene, self.line_enn, self.info_text]
+            return []
         
         with self.lock:
             times_copy = np.array(self.times)
@@ -259,10 +259,7 @@ class RealTimeVisualizer:
         
         min_len = min(len(times_copy), len(enz_copy), len(ene_copy), len(enn_copy))
         if min_len < 10:
-            artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
-            for markers in self.processing_window_markers:
-                artists.extend([markers['line'], markers['fill']])
-            return artists
+            return []
         
         times_trim = times_copy[-min_len:]
         enz_trim = enz_copy[-min_len:]
@@ -308,10 +305,7 @@ class RealTimeVisualizer:
         
         self.info_text.set_text(info_text)
         
-        artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
-        for markers in self.processing_window_markers:
-            artists.extend([markers['line'], markers['fill']])
-        return artists
+        return []
     
     def update_processing_markers(self, rel_times):
         """Actualiza marcadores de ventana de procesamiento CREIME_RT"""
@@ -340,14 +334,15 @@ class RealTimeVisualizer:
             logging.debug(f"Error actualizando marcadores: {e}")
     
     def start_visualization(self):
-        """Inicia visualización"""
-        if not self.visualization_enabled:
+        """Inicia visualización en thread principal"""
+        if not self.visualization_enabled or not self.fig:
             return
             
         try:
             self.running = True
+            # Crear animación sin blit para evitar problemas de threading
             self.animation = animation.FuncAnimation(
-                self.fig, self.update_plot, interval=150, blit=True, cache_frame_data=False
+                self.fig, self.update_plot, interval=200, blit=False, cache_frame_data=False
             )
             logging.info("Visualizador del monitor iniciado")
         except Exception as e:
