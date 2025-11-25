@@ -983,16 +983,18 @@ class MiniSeedSimulator:
     
     def _apply_magnitude_correction(self, raw_output):
         """Aplica corrección de magnitud según reglas especificadas"""
-        if -3.0 < raw_output < 0.0:
-            return raw_output + 4.4
-        elif 0.0 <= raw_output < 2.0:
-            return raw_output + 4.5
-        elif 1.5 < raw_output < 2.0:  # Nota: rango superpuesto, usar el más específico
-            return raw_output + 4.7
-        elif raw_output >= 2.0:
-            return raw_output + 4.8
+        if raw_output < 0.0:
+            return 4.2
+        elif 0.0 <= raw_output < 1.3:
+            return raw_output + 4.3
+        elif 1.3 <= raw_output < 3.2:
+            return raw_output + 3.9
+        elif 3.2 <= raw_output < 3.9:
+            return raw_output + 3.7
+        elif raw_output >= 3.9:
+            return raw_output + 3.6
         else:
-            return raw_output  # Sin corrección para valores <= -3.0
+            return raw_output
     
     def _is_seismic_event(self, result):
         """Determina si es evento sísmico significativo"""
