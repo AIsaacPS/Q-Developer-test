@@ -94,10 +94,8 @@ Datos Crudos → Normalización Z-Score → Filtro 1-45Hz → Conversión Gals �
 
 ### **Latencia Total: ~1.5 segundos**
 
-### Comparación con Sistema Original
-- **Sistema original**: 30 segundos de latencia
-- **Nuestro sistema**: 1.5 segundos (**20x más rápido**)
-- **Traslape de datos**: 96.67% (vs 99% original)
+### Comparación con Sistema HomeSeismo HS301
+- **HS301**: de 1.5 a 5 segundos de latencia
 
 ## 🛡️ Estabilidad y Confiabilidad
 
@@ -167,8 +165,8 @@ python CREIME_RT_Monitor.py --host localhost --port 30000
 
 ### Archivos Generados
 - **Logs**: `logs/creime_rt_monitor.log`
-- **Eventos JSON**: `events_monitor/monitor_event_YYYYMMDD_HHMMSS.json`
-- **Datos MiniSEED**: `events_monitor/monitor_event_YYYYMMDD_HHMMSS.mseed`
+- **Eventos JSON (sólo cuando confirma un sismo)**: `events_monitor/monitor_event_YYYYMMDD_HHMMSS.json`
+- **Datos MiniSEED (sólo cuando confirma un sismo)**: `events_monitor/monitor_event_YYYYMMDD_HHMMSS.mseed`
 
 ### Visualización
 - **Gráficos en tiempo real** de las 3 componentes sísmicas
@@ -196,18 +194,18 @@ python CREIME_RT_Monitor.py --host localhost --port 30000
 - **Tasa de procesamiento**: 1 ventana/segundo
 - **Throughput**: ~300 muestras/segundo
 - **Uso de CPU**: ~30% en Jetson Orin Nano
-- **Uso de GPU**: ~40% durante inferencia
+- **Uso de GPU**: ~20% durante inferencia
 - **Memoria RAM**: ~2GB estable
 
 ## 📁 Estructura del Proyecto
 
 ```
-SAYULA III/
+SAIPy/
 ├── CREIME_RT_Monitor.py          # Sistema principal
 ├── README.md                     # Este archivo
 ├── logs/                         # Logs del sistema
 │   └── creime_rt_monitor.log
-├── events_monitor/               # Eventos detectados
+├── events/               # Eventos detectados
 │   ├── monitor_event_*.json
 │   └── monitor_event_*.mseed
 └── requirements.txt              # Dependencias
@@ -231,9 +229,9 @@ SAYULA III/
 
 ### Limitaciones Técnicas
 - **Dependencia de AnyShake**: Punto único de falla
-- **Latencia inherente**: Mínimo 1 segundo por diseño
+- **Latencia inherente**: Mínimo 1 segundo por parseo de datos AnyShake
 - **Magnitudes altas**: Subestimación en Ml ≥ 5.5
-- **Ruido local**: Puede generar falsos positivos
+- **Ruido local**: Puede generar falsos positivos si la instalación del sensor es incorrecta
 
 ### Consideraciones de Despliegue
 - **Conectividad estable** requerida con AnyShake
@@ -247,13 +245,13 @@ Este software es propiedad exclusiva de **SkyAlert de México S.A. de C.V.** Tod
 
 **© 2025 SkyAlert de México S.A. de C.V. — Todos los derechos reservados.**
 
-## 🙏 Agradecimientos
+##  Agradecimientos
 
-- **SAIPy Team**: Por el modelo CREIME_RT
+- **SAIPy Team**: Por desarrollar y entrenar el modelo CREIME_RT
 - **AnyShake Project**: Por la infraestructura de adquisición de datos  
 - **NVIDIA**: Por la plataforma Jetson Orin Nano
 
 ---
 
-**Desarrollado por SkyAlert de México S.A. de C.V.**  
+**Desarrollado por Ing. Isaac Pérez de SkyAlert de México S.A. de C.V.**  
 *Sistema de Alerta Sísmica Temprana - Tecnología de Vanguardia*
