@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -1026,12 +1026,10 @@ class MiniSeedSimulator:
             raw_confidence = detection_result['confidence']
             corrected_magnitude = self._apply_magnitude_correction(raw_confidence)
             
-            mag_original = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
                 f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
-                f"Magnitud Original: {mag_original}\n"
-                f"Magnitud Corregida: {corrected_magnitude:.1f}\n"
+                f"Magnitud: {corrected_magnitude:.1f}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
@@ -1327,13 +1325,24 @@ class MiniSeedSimulator:
                 logging.info(f"  Porcentaje activación: {(above_threshold/len(self.creime_values)*100):.2f}%")
             
             if self.detected_events:
+                # Calcular magnitud máxima
+                max_magnitude = 0.0
+                for event in self.detected_events:
+                    if event['type'] == 'seismic' and 'corrected_magnitude' in event:
+                        max_magnitude = max(max_magnitude, event['corrected_magnitude'])
+                
+                logging.info(f"Magnitud Final (Máxima): {max_magnitude:.1f}")
+                logging.info(f"")
                 logging.info(f"Detalle de Eventos:")
                 for i, event in enumerate(self.detected_events, 1):
                     event_type = "SÍSMICO" if event['type'] == 'seismic' else "EVENTO"
                     logging.info(f"  {i}. {event_type}:")
                     logging.info(f"     Tiempo MiniSEED: {event['miniseed_time']}")
-                    logging.info(f"     Confianza: {event['confidence']:.6f}")
-                    logging.info(f"     Magnitud: {event['magnitude']:.1f if event['magnitude'] else 'N/A'}")
+                    logging.info(f"     Confianza: {event['confidence']:.2f}")
+                    if 'corrected_magnitude' in event:
+                        logging.info(f"     Magnitud: {event['corrected_magnitude']:.1f}")
+                    else:
+                        logging.info(f"     Magnitud: {event['magnitude']:.1f if event['magnitude'] else 'N/A'}")
                     logging.info(f"     Ventana: {event['processing_id']}")
             else:
                 logging.info(f"  No se detectaron eventos sísmicos")
