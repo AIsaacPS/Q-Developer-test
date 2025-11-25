@@ -430,12 +430,8 @@ class UltraFastBuffer:
                     start_idx = buf_len - self.window_size
                     component_data = [buf[i] for i in range(start_idx, buf_len)]
                 
-                # Aplicar solo normalización z-score (datos ya vienen filtrados)
-                if len(component_data) > 1:
-                    mean_val = np.mean(component_data)
-                    std_val = np.std(component_data)
-                    if std_val > 0:
-                        component_data = [(x - mean_val) / std_val for x in component_data]
+                # Datos ya procesados con Z-Score y filtrados
+                # No aplicar normalización adicional
                 
                 window_data.append(component_data)
             
@@ -470,7 +466,7 @@ class UltraFastBuffer:
             return status
 
 class OptimizedHybridFilter:
-    """Filtro optimizado según documentación CREIME_RT"""
+    """Filtro optimizado: Z-Score → Filtro 1-45Hz → Conversión Gals"""
     
     def __init__(self, fs=100, hp_cutoff=1.0, lp_cutoff=45):
         self.fs = fs
@@ -485,26 +481,38 @@ class OptimizedHybridFilter:
         self.zi_hp = np.zeros(max(len(self.a_hp), len(self.b_hp)) - 1)
         self.zi_lp = np.zeros(max(len(self.a_lp), len(self.b_lp)) - 1)
         
-        self.detrend_buffer = deque(maxlen=fs)
+        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score
     
     def apply_filter(self, data):
-        """Aplica filtro optimizado"""
+        """Pipeline: Z-Score → Filtro 1-45Hz → Conversión Gals"""
         if not data:
             return data
         
-        self.detrend_buffer.extend(data)
-        if len(self.detrend_buffer) > 0:
-            midpoint = np.median(list(self.detrend_buffer)).astype(np.float32)
+        # 1. Normalización Z-Score (reemplaza detrending)
+        self.zscore_buffer.extend(data)
+        if len(self.zscore_buffer) > 1:
+            buffer_data = list(self.zscore_buffer)
+            mean_val = np.mean(buffer_data)
+            std_val = np.std(buffer_data)
+            if std_val > 0:
+                zscore_data = [(x - mean_val) / std_val for x in data]
+            else:
+                zscore_data = [0.0] * len(data)
         else:
-            midpoint = 0.0
+            zscore_data = [0.0] * len(data)
             
-        detrended = [x - midpoint for x in data]
-        detrended_np = np.array(detrended, dtype=np.float32)
+        zscore_np = np.array(zscore_data, dtype=np.float32)
         
-        filtered_hp, self.zi_hp = lfilter(self.b_hp, self.a_hp, detrended_np, zi=self.zi_hp)
+        # 2. Filtro pasa-altas (1 Hz)
+        filtered_hp, self.zi_hp = lfilter(self.b_hp, self.a_hp, zscore_np, zi=self.zi_hp)
+        
+        # 3. Filtro pasa-bajas (45 Hz)
         filtered_lp, self.zi_lp = lfilter(self.b_lp, self.a_lp, filtered_hp, zi=self.zi_lp)
         
-        return filtered_lp.astype(np.float32).tolist()
+        # 4. Conversión a Gals
+        gals_data = filtered_lp * CONVERSION_FACTOR
+        
+        return gals_data.astype(np.float32).tolist()
 
 class UltraFastProcessingPipeline:
     """Pipeline de procesamiento para monitor"""
@@ -561,9 +569,9 @@ class UltraFastProcessingPipeline:
                     else:
                         raw_output = -4.0
                     
-                    if raw_output > -3.5:
+                    if raw_output > -0.5:
                         detection = 1
-                        magnitude = max(raw_output, 0.0) if raw_output > 0 else None
+                        magnitude = raw_output if raw_output > 0 else 0.0
                     else:
                         detection = 0
                         magnitude = None
@@ -636,14 +644,14 @@ class RealTimeMonitor:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # Parámetros según documentación oficial CREIME_RT
-        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)
+        # Parámetros originales CREIME_RT
+        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
         self.latency_target = 0.1  # Latencia objetivo
-        self.detection_threshold = -3.5  # Nuevo umbral de detección
+        self.detection_threshold = -0.5  # Umbral original CREIME_RT
         self.noise_baseline = -4.0
-        self.high_noise_threshold = -1.80  # Umbral para ruido alto
-        self.magnitude_threshold = 1.0  # Ajustado según análisis (máximo 1.6)
-        self.consecutive_windows = 2  # 2 ventanas consecutivas para confirmación
+        self.high_noise_threshold = -1.80
+        self.magnitude_threshold = 0.0  # Umbral original para magnitud
+        self.consecutive_windows = 1  # Sin requerimiento de ventanas consecutivas
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
@@ -750,7 +758,6 @@ class RealTimeMonitor:
             
             if data_values:
                 data_values = self.hybrid_filter.apply_filter(data_values)
-                data_values = [x * CONVERSION_FACTOR for x in data_values]
             
             return {
                 'component': component,
@@ -817,51 +824,28 @@ class RealTimeMonitor:
             return self.noise_baseline
     
     def evaluate_detection(self, result):
-        """Evaluación según documentación oficial CREIME_RT"""
-        if result:
-            if result['confidence'] > self.detection_threshold:
-                self.detection_buffer.append(True)
-                logging.debug(f"Ventana detectada como evento: {result['confidence']:.2f} > {self.detection_threshold}")
-            else:
-                self.detection_buffer.append(False)
-                logging.debug(f"Ventana detectada como ruido: {result['confidence']:.2f} <= {self.detection_threshold}")
+        """Evaluación original CREIME_RT"""
+        if result and result['confidence'] > self.detection_threshold:
+            # Clasificación original CREIME_RT
+            is_seismic = result['confidence'] > self.magnitude_threshold
             
-            if len(self.detection_buffer) >= self.consecutive_windows:
-                recent_detections = list(self.detection_buffer)[-self.consecutive_windows:]
-                consecutive_count = sum(recent_detections)
-                
-                if consecutive_count >= self.consecutive_windows:
-                    logging.info(f"TRIGGER: {consecutive_count}/{self.consecutive_windows} ventanas consecutivas detectadas")
-                    return {
-                        'type': 'event_confirmed',
-                        'consecutive_detections': consecutive_count,
-                        'is_seismic': True  # Confirmación automática con 2 ventanas consecutivas
-                    }
-        else:
-            self.detection_buffer.append(False)
+            logging.info(f"DETECCIÓN: Confianza {result['confidence']:.2f} > {self.detection_threshold}")
+            
+            return {
+                'type': 'event_detected',
+                'consecutive_detections': 1,
+                'is_seismic': is_seismic
+            }
         
         return False
     
     def _apply_magnitude_correction(self, raw_output):
-        """Aplica corrección de magnitud según reglas especificadas"""
-        if raw_output < 0.0:
-            return 4.2
-        elif 0.0 <= raw_output < 1.3:
-            return raw_output + 4.3
-        elif 1.3 <= raw_output < 3.2:
-            return raw_output + 3.9
-        elif 3.2 <= raw_output < 3.9:
-            return raw_output + 3.7
-        elif raw_output >= 3.9:
-            return raw_output + 3.6
-        else:
-            return raw_output
+        """Interpretación original CREIME_RT - sin corrección"""
+        return raw_output
     
     def _is_seismic_event(self, result):
-        """Determina si es evento sísmico significativo"""
-        return (result['confidence'] > 0.0 and 
-                result['magnitude'] is not None and 
-                result['magnitude'] >= self.magnitude_threshold)
+        """Clasificación original CREIME_RT"""
+        return result['confidence'] > self.magnitude_threshold
     
     def trigger_alert(self, detection_result, detection_info):
         """Activa alerta según protocolo oficial CREIME_RT"""
