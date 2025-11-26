@@ -656,9 +656,10 @@ class RealTimeMonitor:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # Parámetros sincronizados con AnyShake (datos cada 1000ms)
+        # Parámetros perfectamente sincronizados con AnyShake
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
-        self.latency_target = 1.0  # 1000ms - perfectamente sincronizado
+        self.anyshake_packet_interval = 0.1  # 100ms - modo tiempo real AnyShake
+        self.latency_target = self.anyshake_packet_interval  # Sincronización perfecta
         self.detection_threshold = -0.5  # Umbral original CREIME_RT
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
@@ -669,7 +670,7 @@ class RealTimeMonitor:
         self.buffer = UltraFastBuffer(
             window_size=self.window_size,
             sampling_rate=sampling_rate,
-            update_interval=self.latency_target  # 10ms para latencia mínima
+            update_interval=self.anyshake_packet_interval  # Sincronizado con AnyShake
         )
         
         self.hybrid_filter = OptimizedHybridFilter(fs=sampling_rate)
@@ -724,10 +725,28 @@ class RealTimeMonitor:
         logging.info(f"UMBRAL RUIDO ALTO: {self.high_noise_threshold}")
         logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows}")
     
+    def enable_anyshake_realtime(self):
+        """Activa modo tiempo real en AnyShake para mayor velocidad de paquetes"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5.0)
+            s.connect((self.host, self.port))
+            s.sendall(b"AT+REALTIME=1\r\n")
+            s.close()
+            logging.info("✅ Modo tiempo real AnyShake activado")
+            return True
+        except Exception as e:
+            logging.warning(f"No se pudo activar modo tiempo real: {e}")
+            return False
+    
     def connect_to_anyshake(self):
         """Conexión con AnyShake Observer"""
         max_retries = 5
         retry_delay = 5
+        
+        # Activar modo tiempo real antes de conectar
+        self.enable_anyshake_realtime()
+        time.sleep(1)  # Esperar activación
         
         for attempt in range(max_retries):
             try:
@@ -783,10 +802,11 @@ class RealTimeMonitor:
             return None
     
     def ultra_fast_processing(self):
-        """Procesamiento ultra-rápido"""
+        """Procesamiento sincronizado con AnyShake"""
         current_time = time.time()
         
-        if current_time - self.last_processing_time < self.latency_target:
+        # Sincronización perfecta: procesar cada vez que llega paquete AnyShake
+        if current_time - self.last_processing_time < self.anyshake_packet_interval:
             return None
         
         window_data = self.buffer.get_latest_window()
