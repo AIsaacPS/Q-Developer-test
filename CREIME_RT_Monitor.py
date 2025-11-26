@@ -662,10 +662,10 @@ class RealTimeMonitor:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # Parámetros perfectamente sincronizados con AnyShake
+        # Parámetros sincronizados con AnyShake (se ajustarán dinámicamente)
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
-        self.anyshake_packet_interval = 0.1  # 100ms - modo tiempo real AnyShake
-        self.latency_target = self.anyshake_packet_interval  # Sincronización perfecta
+        self.anyshake_packet_interval = 1.0  # Inicial - se actualizará según modo
+        self.latency_target = self.anyshake_packet_interval  # Sincronización dinámica
         self.detection_threshold = -0.5  # Umbral original CREIME_RT
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
@@ -738,9 +738,18 @@ class RealTimeMonitor:
             s.settimeout(5.0)
             s.connect((self.host, self.port))
             s.sendall(b"AT+REALTIME=1\r\n")
+            
+            # Leer respuesta para confirmar activación
+            response = s.recv(1024).decode('ascii', errors='ignore').strip()
             s.close()
-            logging.info("✅ Modo tiempo real AnyShake activado")
-            return True
+            
+            if 'OK' in response or 'realtime' in response.lower():
+                logging.info(f"✅ Modo tiempo real AnyShake activado: {response}")
+                return True
+            else:
+                logging.warning(f"⚠️ Respuesta inesperada de AnyShake: {response}")
+                return False
+                
         except Exception as e:
             logging.warning(f"No se pudo activar modo tiempo real: {e}")
             return False
@@ -751,7 +760,17 @@ class RealTimeMonitor:
         retry_delay = 5
         
         # Activar modo tiempo real antes de conectar
-        self.enable_anyshake_realtime()
+        realtime_enabled = self.enable_anyshake_realtime()
+        if realtime_enabled:
+            self.anyshake_packet_interval = 0.1  # 100ms confirmado
+            logging.info("🚀 Modo tiempo real confirmado - Esperando paquetes cada 100ms")
+        else:
+            self.anyshake_packet_interval = 1.0  # 1000ms modo normal
+            logging.info("🐢 Modo normal - Esperando paquetes cada 1000ms")
+        
+        # Actualizar latencia objetivo
+        self.latency_target = self.anyshake_packet_interval
+        
         time.sleep(1)  # Esperar activación
         
         for attempt in range(max_retries):
@@ -1103,6 +1122,20 @@ class RealTimeMonitor:
                                 )
                                 
                                 self.packet_count += 1
+                                
+                                # Monitorear frecuencia de paquetes para verificar modo tiempo real
+                                if self.packet_count % 10 == 0:  # Cada 10 paquetes
+                                    elapsed = current_time - self.start_time
+                                    packet_rate = self.packet_count / elapsed if elapsed > 0 else 0
+                                    expected_rate = 3.0 / self.anyshake_packet_interval  # 3 componentes
+                                    
+                                    if packet_rate > expected_rate * 0.8:  # 80% de la tasa esperada
+                                        mode_status = "🚀 TIEMPO REAL" if self.anyshake_packet_interval < 0.5 else "🐢 NORMAL"
+                                    else:
+                                        mode_status = "⚠️ LENTO"
+                                    
+                                    if self.packet_count == 10:  # Solo mostrar al inicio
+                                        logging.info(f"Tasa de paquetes: {packet_rate:.1f} pkt/s - Modo: {mode_status}")
                                 
                     except Exception as e:
                         continue
