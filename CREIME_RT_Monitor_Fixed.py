@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 004
+# CAMBIO 005
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -482,25 +482,27 @@ class OptimizedHybridFilter:
         self.zi_hp = np.zeros(max(len(self.a_hp), len(self.b_hp)) - 1)
         self.zi_lp = np.zeros(max(len(self.a_lp), len(self.b_lp)) - 1)
         
-        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score
+        self.zscore_buffer = deque(maxlen=fs*5)  # Buffer más grande para Z-Score estable
     
     def apply_filter(self, data):
         """Pipeline: Z-Score → Filtro 1-45Hz → Conversión Gals"""
         if not data:
             return data
         
-        # 1. Normalización Z-Score (reemplaza detrending)
+        # 1. Normalización Z-Score mejorada para modo tiempo real
         self.zscore_buffer.extend(data)
-        if len(self.zscore_buffer) > 1:
+        if len(self.zscore_buffer) > 50:  # Mínimo 50 muestras para estabilidad
             buffer_data = list(self.zscore_buffer)
             mean_val = np.mean(buffer_data)
             std_val = np.std(buffer_data)
-            if std_val > 0:
+            if std_val > 0.001:  # Evitar división por cero
                 zscore_data = [(x - mean_val) / std_val for x in data]
             else:
-                zscore_data = [0.0] * len(data)
+                zscore_data = [x - mean_val for x in data]  # Solo centrar si std muy pequeño
         else:
-            zscore_data = [0.0] * len(data)
+            # Centrado simple hasta tener suficientes datos
+            mean_val = np.mean(data) if data else 0
+            zscore_data = [x - mean_val for x in data]
             
         zscore_np = np.array(zscore_data, dtype=np.float32)
         
