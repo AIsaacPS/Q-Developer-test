@@ -728,49 +728,27 @@ class RealTimeMonitor:
     
     def enable_anyshake_realtime(self):
         """Activa modo tiempo real en AnyShake usando comando confirmado"""
-        # Comando confirmado que funciona
         cmd = b"AT+REALTIME=1\r\n"
         
         try:
-    
-            
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5.0)  # Más tiempo como en tu script
+            s.settimeout(5.0)
             s.connect((self.host, self.port))
             s.sendall(cmd)
-            
-            # Esperar activación como en tu script exitoso
             time.sleep(1)
-            
             s.close()
-
             return True
-            
         except Exception as e:
             logging.warning(f"Error enviando comando: {e}")
             return False
-        
-        logging.warning("No se pudo enviar comando AT+REALTIME=1")
-        logging.info("El sistema continuará y detectará automáticamente si el modo se activó")
-        return False
     
     def connect_to_anyshake(self):
         """Conexión con AnyShake Observer"""
         max_retries = 5
         retry_delay = 5
         
-        # Intentar activar modo tiempo real
-
         realtime_enabled = self.enable_anyshake_realtime()
-        
-        # El modo se detectará automáticamente por tasa de paquetes
-        self.anyshake_packet_interval = 1.0  # Inicial - se ajustará dinámicamente
-        if realtime_enabled:
-
-        else:
-
-        
-        # Actualizar latencia objetivo y buffer
+        self.anyshake_packet_interval = 1.0
         self.latency_target = self.anyshake_packet_interval
         self.buffer.update_interval = self.anyshake_packet_interval
         
@@ -1156,25 +1134,25 @@ class RealTimeMonitor:
                                     packet_rate = self.packet_count / elapsed if elapsed > 0 else 0
                                     expected_rate = 3.0 / self.anyshake_packet_interval  # 3 componentes
                                     
-                                    # Detectar modo tiempo real automáticamente
-                                    if packet_rate > 25:  # >25 pkt/s indica modo tiempo real
+                                    # Detectar modo tiempo real según tu script exitoso (10 pkt/s)
+                                    if packet_rate > 8:  # >8 pkt/s indica modo tiempo real (tu script: 10 pkt/s)
                                         if self.anyshake_packet_interval != 0.1:
                                             self.anyshake_packet_interval = 0.1
                                             self.latency_target = 0.1
-                                            logging.info("MODO TIEMPO REAL DETECTADO - Latencia objetivo: 0.4s")
-                                        mode_status = "TIEMPO REAL"
-                                    elif packet_rate > 2.5:  # >2.5 pkt/s indica modo normal
+                                            logging.info("MODO TIEMPO REAL CONFIRMADO - 10 pkt/s detectados")
+                                        mode_status = "TIEMPO REAL (10Hz)"
+                                    elif packet_rate > 2.5:
                                         if self.anyshake_packet_interval != 1.0:
                                             self.anyshake_packet_interval = 1.0
                                             self.latency_target = 1.0
-                                            logging.info("MODO NORMAL DETECTADO - Latencia objetivo: 1.5s")
-                                        mode_status = "NORMAL"
+                                        mode_status = "NORMAL (1Hz)"
                                     else:
                                         mode_status = "LENTO"
                                     
-                                    if self.packet_count == 15:  # Solo mostrar al inicio
-                                        logging.info(f"Tasa: {packet_rate:.1f} pkt/s - Modo: {mode_status} - Latencia: {self.latency_target*1000:.0f}ms")
-                                        logging.info(f"Esperado: {expected_rate:.1f} pkt/s - Intervalo: {self.anyshake_packet_interval*1000:.0f}ms")
+                                    if self.packet_count == 15:
+                                        logging.info(f"Tasa: {packet_rate:.1f} pkt/s - {mode_status}")
+                                        if packet_rate > 8:
+                                            logging.info("AT+REALTIME=1 exitoso - Sistema optimizado")
                                 
                     except Exception as e:
                         continue
@@ -1280,8 +1258,6 @@ class RealTimeMonitor:
     
     def start_monitor(self):
         """Inicia el monitor completo"""
-        # Obtener información del dispositivo
-
         device_info = self.check_anyshake_info()
         
         if not self.connect_to_anyshake():
@@ -1302,10 +1278,7 @@ class RealTimeMonitor:
         )
         self.data_thread.start()
         
-        # Esperar a que el worker CREIME_RT esté completamente inicializado
-
-        
-        worker_ready = self.processing_pipeline.is_worker_ready(timeout=60)  # Más tiempo
+        worker_ready = self.processing_pipeline.is_worker_ready(timeout=60)
         
         if worker_ready:
             logging.info("CREIME_RT listo")
@@ -1318,13 +1291,8 @@ class RealTimeMonitor:
             )
             self.processing_thread.start()
             
-            # Iniciar visualizador solo si el worker está listo
             if VISUALIZATION_ENABLED:
-
                 self.visualizer.start_visualization()
-            else:
-
-                
         else:
             logging.error("Worker CREIME_RT no se inicializó correctamente")
             logging.error("Visualizador NO iniciado - Sistema en modo degradado")
@@ -1340,9 +1308,7 @@ class RealTimeMonitor:
             current_samples = status['ENZ']['samples']
             buffer_ready = current_samples >= 50
             
-            if not buffer_ready and (time.time() - startup_time > 1):
 
-        
         logging.info("Monitor operativo")
         
         return True
