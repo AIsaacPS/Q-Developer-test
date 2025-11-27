@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -982,19 +982,24 @@ class MiniSeedSimulator:
         return False
     
     def _apply_magnitude_correction(self, raw_output):
-        """Aplica corrección de magnitud según reglas especificadas"""
-        if raw_output < 0.0:
-            return 4.2
-        elif 0.0 <= raw_output < 1.3:
-            return raw_output + 4.3
-        elif 1.3 <= raw_output < 3.2:
-            return raw_output + 3.9
-        elif 3.2 <= raw_output < 3.9:
-            return raw_output + 3.7
-        elif raw_output >= 3.9:
-            return raw_output + 3.6
-        else:
-            return raw_output
+        """Corrección de magnitud según reglas especificadas"""
+        # Ruido: sin magnitud
+        if raw_output <= -3.5:
+            return None
+        
+        # Evento débil: fórmula lineal
+        if -3.5 < raw_output < 0.0:
+            return round(0.21 * raw_output + 4.2, 1)
+        
+        # Saturación máxima
+        if raw_output > 5.3:
+            return 8.8
+        
+        # Mapeo lineal para raw_output ≥ 0.0
+        # magnitud = 0.855 × raw_output + 4.2
+        magnitude = 0.855 * raw_output + 4.2
+        
+        return round(magnitude, 1)
     
     def _is_seismic_event(self, result):
         """Determina si es evento sísmico significativo"""
@@ -1028,10 +1033,17 @@ class MiniSeedSimulator:
             raw_confidence = detection_result['confidence']
             corrected_magnitude = self._apply_magnitude_correction(raw_confidence)
             
+            # Log de corrección para análisis
+            if corrected_magnitude is not None:
+                logging.debug(f"Corrección magnitud: {raw_confidence:.2f} → {corrected_magnitude:.1f}")
+            else:
+                logging.debug(f"Ruido detectado: {raw_confidence:.2f} ≤ -3.5 (sin magnitud)")
+            
+            mag_display = f"{corrected_magnitude:.1f}" if corrected_magnitude is not None else "Sin magnitud (ruido)"
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
-                f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
-                f"Magnitud: {corrected_magnitude:.1f}\n"
+                f"Raw CREIME_RT: {detection_result['confidence']:.2f}\n"
+                f"Magnitud Corregida: {mag_display}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
                 f"Latencia: {detection_result['processing_time']:.3f}s"
