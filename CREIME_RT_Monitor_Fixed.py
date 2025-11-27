@@ -731,18 +731,29 @@ class RealTimeMonitor:
             s.sendall(b"AT+REALTIME=1\r\n")
             time.sleep(1)
             s.close()
+            logging.info("Comando AT+REALTIME=1 enviado")
             return True
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Error activando tiempo real: {e}")
             return False
     
     def connect_to_anyshake(self):
         """Conexión con AnyShake Observer"""
-        self.enable_anyshake_realtime()
-        self.anyshake_packet_interval = 1.0
+        # Activar modo tiempo real
+        realtime_success = self.enable_anyshake_realtime()
+        
+        # Configurar intervalos iniciales optimistas
+        if realtime_success:
+            self.anyshake_packet_interval = 0.1  # Esperamos 100ms
+            logging.info("Configurado para modo tiempo real (100ms)")
+        else:
+            self.anyshake_packet_interval = 1.0  # Fallback a modo normal
+            logging.info("Fallback a modo normal (1000ms)")
+            
         self.latency_target = self.anyshake_packet_interval
         self.buffer.update_interval = self.anyshake_packet_interval
         
-        time.sleep(1)
+        time.sleep(2)  # Esperar activación
         
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1105,18 +1116,18 @@ class RealTimeMonitor:
                                         if self.anyshake_packet_interval != 0.1:
                                             self.anyshake_packet_interval = 0.1
                                             self.latency_target = 0.1
-                                            logging.info("Modo tiempo real activado")
+                                            self.buffer.update_interval = 0.1
+                                            logging.info("MODO TIEMPO REAL ACTIVADO - 10 pkt/s")
                                         mode_status = "TIEMPO REAL"
                                     elif packet_rate > 2.5:
-                                        if self.anyshake_packet_interval != 1.0:
-                                            self.anyshake_packet_interval = 1.0
-                                            self.latency_target = 1.0
                                         mode_status = "NORMAL"
                                     else:
                                         mode_status = "LENTO"
                                     
                                     if self.packet_count == 15:
                                         logging.info(f"Tasa: {packet_rate:.1f} pkt/s - {mode_status}")
+                                        if packet_rate > 8:
+                                            logging.info("AT+REALTIME=1 exitoso - Latencia optimizada")
                                 
                     except Exception as e:
                         continue
