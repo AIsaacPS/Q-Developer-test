@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 005
+# CAMBIO 006
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -489,18 +489,15 @@ class OptimizedHybridFilter:
         if not data:
             return data
         
-        # 1. Normalización Z-Score mejorada para modo tiempo real
+        # 1. Centrado simple y estable para modo tiempo real
         self.zscore_buffer.extend(data)
-        if len(self.zscore_buffer) > 50:  # Mínimo 50 muestras para estabilidad
+        if len(self.zscore_buffer) > 100:  # Buffer estable
             buffer_data = list(self.zscore_buffer)
             mean_val = np.mean(buffer_data)
-            std_val = np.std(buffer_data)
-            if std_val > 0.001:  # Evitar división por cero
-                zscore_data = [(x - mean_val) / std_val for x in data]
-            else:
-                zscore_data = [x - mean_val for x in data]  # Solo centrar si std muy pequeño
+            # Solo centrar, sin normalización Z-Score agresiva
+            zscore_data = [x - mean_val for x in data]
         else:
-            # Centrado simple hasta tener suficientes datos
+            # Centrado local hasta tener buffer
             mean_val = np.mean(data) if data else 0
             zscore_data = [x - mean_val for x in data]
             
@@ -1069,7 +1066,7 @@ class RealTimeMonitor:
         
         while self.running:
             try:
-                data = self.socket.recv(4096)
+                data = self.socket.recv(8192)  # Buffer más grande para evitar gaps
                 if not data:
                     logging.warning("Conexión cerrada - Reconectando...")
                     if not self.connect_to_anyshake():
