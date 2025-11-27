@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CAMBIO 001
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -414,8 +415,8 @@ class UltraFastBuffer:
         with self.lock:
             current_time = time.time()
             
-            # Procesar cada 10ms para latencia mínima
-            if current_time - self.last_window_time < self.update_interval:
+            # Procesar cada 100ms para latencia mínima
+            if current_time - self.last_window_time < 0.1:
                 return None
                 
             if not self.ready:
@@ -740,20 +741,16 @@ class RealTimeMonitor:
     def connect_to_anyshake(self):
         """Conexión con AnyShake Observer"""
         # Activar modo tiempo real
-        realtime_success = self.enable_anyshake_realtime()
+        self.enable_anyshake_realtime()
         
-        # Configurar intervalos iniciales optimistas
-        if realtime_success:
-            self.anyshake_packet_interval = 0.1  # Esperamos 100ms
-            logging.info("Configurado para modo tiempo real (100ms)")
-        else:
-            self.anyshake_packet_interval = 1.0  # Fallback a modo normal
-            logging.info("Fallback a modo normal (1000ms)")
-            
-        self.latency_target = self.anyshake_packet_interval
-        self.buffer.update_interval = self.anyshake_packet_interval
+        # FORZAR modo tiempo real desde el inicio
+        self.anyshake_packet_interval = 0.1  # FORZAR 100ms
+        self.latency_target = 0.1
+        self.buffer.update_interval = 0.1
+        logging.info("FORZANDO modo tiempo real (100ms) - Esperando 10 pkt/s")
         
         time.sleep(2)  # Esperar activación
+        logging.info("Sistema configurado en modo ULTRA RÁPIDO - Buffer 100ms")
         
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -804,8 +801,8 @@ class RealTimeMonitor:
         """Procesamiento ultra-rápido adaptativo según modo AnyShake"""
         current_time = time.time()
         
-        # Procesamiento adaptativo: más frecuente en modo tiempo real
-        min_interval = self.anyshake_packet_interval * 0.5  # 50ms en tiempo real, 500ms en normal
+        # Procesamiento ULTRA RÁPIDO - cada 50ms
+        min_interval = 0.05  # FIJO 50ms para máxima velocidad
         if current_time - self.last_processing_time < min_interval:
             return None
         
