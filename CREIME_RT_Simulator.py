@@ -162,6 +162,10 @@ class RealTimeVisualizer:
             self.setup_processing_markers()
             
             plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            # Configurar evento de cierre de ventana
+            self.fig.canvas.mpl_connect('close_event', self.on_window_close)
+            
             logging.info("Visualizador del simulador configurado correctamente")
             
         except Exception as e:
@@ -369,6 +373,13 @@ class RealTimeVisualizer:
         except Exception as e:
             logging.error(f"Error iniciando visualización: {e}")
             self.visualization_enabled = False
+    
+    def on_window_close(self, event):
+        """Maneja el cierre de la ventana del visualizador"""
+        logging.info("Ventana cerrada - Generando gráfico CREIME_RT automáticamente")
+        self.detector.stop_simulation()
+        # Generar gráfico automáticamente al cerrar
+        self.detector.plot_creime_output_timeline()
     
     def stop_visualization(self):
         """Detiene el sistema de visualización"""
@@ -1061,7 +1072,7 @@ class MiniSeedSimulator:
                 'processing_id': detection_result['processing_id']
             })
             
-            self.save_event_data(detection_result)
+            self.save_event_data(detection_result, corrected_magnitude)
         else:
             mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
@@ -1084,7 +1095,7 @@ class MiniSeedSimulator:
                 'processing_id': detection_result['processing_id']
             })
     
-    def save_event_data(self, detection_result):
+    def save_event_data(self, detection_result, corrected_magnitude):
         """Guarda datos del evento detectado en simulador"""
         try:
             events_dir = "events_simulator"
@@ -1098,8 +1109,9 @@ class MiniSeedSimulator:
                 "station_id": self.station_id,
                 "event_id": event_id,
                 "timestamp": detection_result['timestamp'].isoformat(),
-                "confidence": detection_result['confidence'],
-                "magnitude": detection_result['magnitude'],
+                "raw_output": detection_result['confidence'],
+                "magnitude": corrected_magnitude,
+                "original_magnitude": detection_result['magnitude'],
                 "source_file": self.miniseed_file,
                 "playback_speed": self.playback_speed
             }
@@ -1107,7 +1119,10 @@ class MiniSeedSimulator:
             json_filename = os.path.join(events_dir, f"sim_event_{timestamp_str}.json")
             with open(json_filename, 'w') as f:
                 json.dump(json_data, f, indent=2)
-            logging.info(f"Evento simulador guardado: {json_filename}")
+ulador guardado: {json_filename}")
+            
+        except Exception as e:
+            logging.error(f"Error guardando evento simulador: {e}")ulador guardado: {json_filename}")
             
         except Exception as e:
             logging.error(f"Error guardando evento simulador: {e}")

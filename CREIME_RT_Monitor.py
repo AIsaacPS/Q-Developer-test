@@ -666,7 +666,7 @@ class RealTimeMonitor:
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
         self.anyshake_packet_interval = 1.0  # Inicial - se actualizará según modo
         self.latency_target = self.anyshake_packet_interval  # Sincronización dinámica
-        self.detection_threshold = -0.5  # Umbral original CREIME_RT
+        self.detection_threshold = -3.5  # Umbral empírico optimizado
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
         self.magnitude_threshold = 0.0  # Umbral original para magnitud
@@ -1029,9 +1029,9 @@ class RealTimeMonitor:
                 "station_id": self.station_id,
                 "event_id": event_id,
                 "timestamp": detection_result['timestamp'].isoformat(),
-                "confidence": detection_result['confidence'],
-                "magnitude": detection_result['magnitude'],
-                "corrected_magnitude": corrected_magnitude
+                "raw_output": detection_result['confidence'],
+                "magnitude": corrected_magnitude,
+                "original_magnitude": detection_result['magnitude']
             }
             
             json_filename = os.path.join(events_dir, f"monitor_event_{timestamp_str}.json")
