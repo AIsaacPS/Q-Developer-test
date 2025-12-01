@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CAMBIO 008
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -146,7 +147,7 @@ class RealTimeVisualizer:
             ]
             
             for ax, title, color in components_config:
-                ax.set_ylabel('Aceleración (Gals)', fontsize=12)
+                ax.set_ylabel('Cuentas (Z-Score)', fontsize=12)
                 ax.set_title(title, fontsize=14, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
@@ -166,8 +167,6 @@ class RealTimeVisualizer:
             
             # Configurar evento de cierre de ventana
             self.fig.canvas.mpl_connect('close_event', self.on_window_close)
-            
-
             
         except Exception as e:
             logging.error(f"Error configurando visualización: {e}")
@@ -416,8 +415,8 @@ class UltraFastBuffer:
         with self.lock:
             current_time = time.time()
             
-            # Procesar cada 10ms para latencia mínima
-            if current_time - self.last_window_time < self.update_interval:
+            # FORZAR procesamiento cada 100ms
+            if current_time - self.last_window_time < 0.1:
                 return None
                 
             if not self.ready:
@@ -468,53 +467,34 @@ class UltraFastBuffer:
             return status
 
 class OptimizedHybridFilter:
-    """Filtro optimizado: Z-Score → Filtro 1-45Hz → Conversión Gals"""
+    """Filtro optimizado: Solo Z-Score (sin conversión a Gals)"""
     
-    def __init__(self, fs=100, hp_cutoff=1.0, lp_cutoff=45):
+    def __init__(self, fs=100):
         self.fs = fs
-        nyquist = 0.5 * fs
-        
-        normal_cutoff_hp = hp_cutoff / nyquist
-        self.b_hp, self.a_hp = butter(2, normal_cutoff_hp, btype='high', analog=False)
-        
-        normal_cutoff_lp = lp_cutoff / nyquist
-        self.b_lp, self.a_lp = butter(4, normal_cutoff_lp, btype='low', analog=False)
-        
-        self.zi_hp = np.zeros(max(len(self.a_hp), len(self.b_hp)) - 1)
-        self.zi_lp = np.zeros(max(len(self.a_lp), len(self.b_lp)) - 1)
-        
-        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score
+        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score (1 segundo)
     
     def apply_filter(self, data):
-        """Pipeline: Z-Score → Filtro 1-45Hz → Conversión Gals"""
+        """Aplica normalización Z-Score requerida por CREIME_RT"""
         if not data:
             return data
-        
-        # 1. Normalización Z-Score (reemplaza detrending)
-        self.zscore_buffer.extend(data)
-        if len(self.zscore_buffer) > 1:
-            buffer_data = list(self.zscore_buffer)
-            mean_val = np.mean(buffer_data)
-            std_val = np.std(buffer_data)
-            if std_val > 0:
-                zscore_data = [(x - mean_val) / std_val for x in data]
-            else:
-                zscore_data = [0.0] * len(data)
-        else:
-            zscore_data = [0.0] * len(data)
             
-        zscore_np = np.array(zscore_data, dtype=np.float32)
+        # Actualizar buffer Z-Score
+        self.zscore_buffer.extend(data)
         
-        # 2. Filtro pasa-altas (1 Hz)
-        filtered_hp, self.zi_hp = lfilter(self.b_hp, self.a_hp, zscore_np, zi=self.zi_hp)
-        
-        # 3. Filtro pasa-bajas (45 Hz)
-        filtered_lp, self.zi_lp = lfilter(self.b_lp, self.a_lp, filtered_hp, zi=self.zi_lp)
-        
-        # 4. Conversión a Gals
-        gals_data = filtered_lp * CONVERSION_FACTOR
-        
-        return gals_data.astype(np.float32).tolist()
+        # Normalizar solo si tenemos suficientes datos
+        if len(self.zscore_buffer) > 1:
+            buffer_array = np.array(self.zscore_buffer)
+            mean_val = np.mean(buffer_array)
+            std_val = np.std(buffer_array)
+            
+            if std_val > 0:
+                normalized_data = [(x - mean_val) / std_val for x in data]
+            else:
+                normalized_data = [0.0] * len(data)
+        else:
+            normalized_data = [0.0] * len(data)
+            
+        return normalized_data
 
 class UltraFastProcessingPipeline:
     """Pipeline de procesamiento para monitor"""
@@ -543,15 +523,15 @@ class UltraFastProcessingPipeline:
             )
             worker.start()
             self.workers.append(worker)
-        
-
     
     def processing_worker(self):
         """Worker para CREIME_RT en monitor"""
         try:
             from saipy.models.creime import CREIME_RT
+            # Validar ruta del modelo para prevenir CWE-94
+            if not os.path.isfile(self.model_path) or not self.model_path.endswith(('.h5', '.hdf5', '.pb')):
+                raise ValueError(f"Ruta de modelo inválida: {self.model_path}")
             model = CREIME_RT(self.model_path)
-
             
             # Señalar que el worker está listo
             self.worker_initialized = True
@@ -581,6 +561,7 @@ class UltraFastProcessingPipeline:
                     else:
                         raw_output = -4.0
                     
+                    # UMBRAL SINCRONIZADO CON SIMULADOR: -3.5
                     if raw_output > -3.5:
                         detection = 1
                         magnitude = raw_output if raw_output > 0 else 0.0
@@ -657,6 +638,16 @@ class RealTimeMonitor:
     """
     
     def __init__(self, model_path, host='localhost', port=30000, sampling_rate=100):
+        # Validación de seguridad para prevenir CWE-94
+        if not isinstance(model_path, str) or not os.path.isfile(model_path):
+            raise ValueError("model_path debe ser una ruta válida")
+        if not isinstance(host, str) or len(host) > 253:
+            raise ValueError("host inválido")
+        if not isinstance(port, int) or not (1 <= port <= 65535):
+            raise ValueError("port debe estar entre 1-65535")
+        if not isinstance(sampling_rate, int) or sampling_rate <= 0:
+            raise ValueError("sampling_rate debe ser positivo")
+            
         self.model_path = model_path
         self.host = host
         self.port = port
@@ -727,66 +718,113 @@ class RealTimeMonitor:
         logging.info(f"Monitor CREIME_RT configurado - {host}:{port}")
     
     def enable_anyshake_realtime(self):
-        """Activa modo tiempo real en AnyShake"""
+        """Activa modo tiempo real en AnyShake - protocolo correcto"""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5.0)
-            s.connect((self.host, self.port))
-            s.sendall(b"AT+REALTIME=1\r\n")
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5.0)
+            self.socket.connect((self.host, self.port))
+            
+            # Enviar comando REALTIME según ANYSHAKE RULES
+            self.socket.sendall(b"AT+REALTIME=1\r\n")
             time.sleep(1)
-            s.close()
+            
+            # Configurar para recepción no bloqueante
+            self.socket.setblocking(False)
+            
+            logging.info("Modo REALTIME activado - Conexión establecida")
             return True
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Error activando tiempo real: {e}")
             return False
     
     def connect_to_anyshake(self):
         """Conexión con AnyShake Observer"""
+        # Activar modo tiempo real
         self.enable_anyshake_realtime()
-        self.anyshake_packet_interval = 1.0
-        self.latency_target = self.anyshake_packet_interval
-        self.buffer.update_interval = self.anyshake_packet_interval
         
-        time.sleep(1)
+        # FORZAR modo tiempo real desde el inicio
+        self.anyshake_packet_interval = 0.1  # FORZAR 100ms
+        self.latency_target = 0.1
+        self.buffer.update_interval = 0.1
+        logging.info("FORZANDO modo tiempo real (100ms) - Esperando 10 pkt/s")
         
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)
-            self.socket.connect((self.host, self.port))
-            logging.info(f"Conexión establecida: {self.host}:{self.port}")
-            return True
-        except Exception as e:
-            logging.error(f"Error conectando: {e}")
-            return False
+        # FORZAR cambio directo en el buffer
+        with self.buffer.lock:
+            self.buffer.update_interval = 0.1
+        logging.info("Buffer forzado a 100ms - Procesamiento cada 0.1s")
+        
+        time.sleep(2)  # Esperar activación
+        logging.info("Sistema configurado en modo ULTRA RÁPIDO - Buffer 100ms")
+        
+        if self.socket is None:
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.settimeout(10.0)
+                self.socket.connect((self.host, self.port))
+            except Exception as e:
+                logging.error(f"Error conectando: {e}")
+                return False
+        
+        logging.info(f"Conexión establecida: {self.host}:{self.port}")
+        return True
     
-    def parse_observer_packet(self, packet):
-        """Parser optimizado para paquetes AnyShake"""
+    def parse_observer_packet(self, data_line):
+        """Parser correcto para paquetes AnyShake - copiado de AnyShake-data-stream"""
         try:
-            parts = packet.strip().split(',')
+            data_line = data_line.strip()
             
-            if len(parts) < 9 or parts[0][0] != '$' or '*' not in parts[-1]:
+            # Validar formato básico
+            if not data_line.startswith('$'):
                 return None
             
-            component = parts[4]
-            timestamp = int(parts[5])
-            sampling_rate = int(parts[6])
+            # Buscar el checksum
+            if '*' not in data_line:
+                return None
+                
+            main_part, checksum_part = data_line.split('*', 1)
+            checksum = checksum_part.replace('\r', '')
             
-            if sampling_rate != self.sampling_rate:
+            # Dividir por comas
+            parts = main_part.split(',')
+            if len(parts) < 8:
                 return None
             
-            data_start = 7
-            data_end = len(parts) - 1
-            raw_data = parts[data_start:data_end]
+            # Extraer campos según especificación
+            sequence = parts[0]          # $N
+            manufacturer = parts[1]      # AS
+            device_type = parts[2]       # SHAKE  
+            station_id = parts[3]        # ID
+            component = parts[4]         # COMP (ENZ, ENE, ENN)
+            timestamp = int(parts[5])    # TIMESTAMP (ms desde epoch)
+            sample_rate = int(parts[6])  # FS (Hz)
             
-            data_values = [int(x) for x in raw_data]
+            # Validar sample rate
+            if sample_rate != self.sampling_rate:
+                return None
             
-            if data_values:
-                data_values = self.hybrid_filter.apply_filter(data_values)
+            # Extraer datos de aceleración (valores enteros)
+            data_values = []
+            for i in range(7, len(parts)):
+                part = parts[i].strip()
+                if part and not part.startswith('*'):  # Evitar el checksum
+                    try:
+                        data_values.append(int(part))
+                    except ValueError:
+                        continue
             
+            if not data_values:
+                return None
+                
+            # Aplicar normalización Z-Score (sin conversión a Gals)
+            normalized_data = self.hybrid_filter.apply_filter(data_values)
+                
             return {
                 'component': component,
                 'timestamp': timestamp,
-                'sampling_rate': sampling_rate,
-                'data': data_values
+                'sampling_rate': sample_rate,
+                'data': normalized_data,
+                'sequence': sequence,
+                'checksum': checksum
             }
             
         except Exception as e:
@@ -797,8 +835,8 @@ class RealTimeMonitor:
         """Procesamiento ultra-rápido adaptativo según modo AnyShake"""
         current_time = time.time()
         
-        # Procesamiento adaptativo: más frecuente en modo tiempo real
-        min_interval = self.anyshake_packet_interval * 0.5  # 50ms en tiempo real, 500ms en normal
+        # Procesamiento ULTRA RÁPIDO - cada 50ms
+        min_interval = 0.05  # FIJO 50ms para máxima velocidad
         if current_time - self.last_processing_time < min_interval:
             return None
         
@@ -1068,8 +1106,11 @@ class RealTimeMonitor:
                 
                 self.data_buffer += data
                 
-                while b'\r' in self.data_buffer:
-                    packet, self.data_buffer = self.data_buffer.split(b'\r', 1)
+                while b'\n' in self.data_buffer or b'\r' in self.data_buffer:
+                    if b'\n' in self.data_buffer:
+                        packet, self.data_buffer = self.data_buffer.split(b'\n', 1)
+                    else:
+                        packet, self.data_buffer = self.data_buffer.split(b'\r', 1)
                     
                     try:
                         packet_str = packet.decode('ascii', errors='ignore').strip()
@@ -1109,18 +1150,18 @@ class RealTimeMonitor:
                                         if self.anyshake_packet_interval != 0.1:
                                             self.anyshake_packet_interval = 0.1
                                             self.latency_target = 0.1
-                                            logging.info("Modo tiempo real activado")
+                                            self.buffer.update_interval = 0.1
+                                            logging.info("MODO TIEMPO REAL ACTIVADO - 10 pkt/s")
                                         mode_status = "TIEMPO REAL"
                                     elif packet_rate > 2.5:
-                                        if self.anyshake_packet_interval != 1.0:
-                                            self.anyshake_packet_interval = 1.0
-                                            self.latency_target = 1.0
                                         mode_status = "NORMAL"
                                     else:
                                         mode_status = "LENTO"
                                     
                                     if self.packet_count == 15:
                                         logging.info(f"Tasa: {packet_rate:.1f} pkt/s - {mode_status}")
+                                        if packet_rate > 8:
+                                            logging.info("AT+REALTIME=1 exitoso - Latencia optimizada")
                                 
                     except Exception as e:
                         continue
@@ -1201,25 +1242,6 @@ class RealTimeMonitor:
         except Exception as e:
             logging.error(f"Error generando gráfico: {e}")
     
-    def check_anyshake_info(self):
-        """Obtiene información del dispositivo AnyShake"""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(3.0)
-            s.connect((self.host, self.port))
-            s.sendall(b"AT+INFO\r\n")
-            
-            response = s.recv(1024).decode('ascii', errors='ignore').strip()
-            s.close()
-            
-            if response and len(response) > 10:
-                return response
-                
-        except Exception:
-            pass
-                
-        return None
-    
     def start_monitor(self):
         """Inicia el monitor completo"""
         if not self.connect_to_anyshake():
@@ -1269,7 +1291,6 @@ class RealTimeMonitor:
             status = self.buffer.get_buffer_status()
             current_samples = status['ENZ']['samples']
             buffer_ready = current_samples >= 50
-            
 
         logging.info("Monitor operativo")
         
@@ -1402,6 +1423,23 @@ def main():
     
     args = parser.parse_args()
     
+    # Buscar modelo automáticamente si es directorio
+    model_path = args.model_path
+    if os.path.isdir(model_path):
+        # Buscar archivos de modelo en el directorio
+        for ext in ['.h5', '.hdf5', '.pb']:
+            for file in os.listdir(model_path):
+                if file.endswith(ext):
+                    model_path = os.path.join(model_path, file)
+                    logging.info(f"Modelo encontrado: {model_path}")
+                    break
+            if os.path.isfile(model_path):
+                break
+    
+    if not os.path.isfile(model_path):
+        logging.error(f"No se encontró modelo válido en: {args.model_path}")
+        sys.exit(1)
+    
     # Crear directorios
     for directory in ["logs", "events_monitor"]:
         if not os.path.exists(directory):
@@ -1416,7 +1454,7 @@ def main():
     
     # Crear monitor
     monitor = RealTimeMonitor(
-        model_path=args.model_path,
+        model_path=model_path,
         host=args.host,
         port=args.port
     )
