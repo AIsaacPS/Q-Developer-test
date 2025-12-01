@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 008
+# CAMBIO 009 - Ventana CREIME_RT reducida a 15 segundos para pruebas de respuesta
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -24,8 +24,19 @@ from obspy import Stream, Trace, UTCDateTime
 from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suprimir warnings TF
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Solo GPU 0
+
+# Optimización de memoria para producción 24/7
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['TF_ENABLE_GPU_GARBAGE_COLLECTION'] = 'true'
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.7'  # Limitar a 70% GPU
+
+# Suprimir warnings adicionales
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 # Configuración de logging optimizada
 log_dir = "logs"
@@ -59,8 +70,8 @@ except Exception as e:
     VISUALIZATION_ENABLED = False
     logging.warning(f"Error configurando matplotlib: {e} - visualización desactivada")
 
-# Constantes de visualización
-DISPLAY_SECONDS = 60
+# Constantes de visualización optimizadas
+DISPLAY_SECONDS = 30  # Reducido para mejor rendimiento
 SAMPLING_RATE = 100
 MAX_VISUALIZATION_SAMPLES = DISPLAY_SECONDS * SAMPLING_RATE
 
@@ -70,10 +81,13 @@ MG_TO_GALS = 0.980665
 CONVERSION_FACTOR = SENSITIVITY * MG_TO_GALS
 
 # Colores personalizados
-COLOR_TEAL = '#009688'
-COLOR_ORANGE = '#FF9800'
-COLOR_RED = '#FF0000'
-COLOR_GREEN = '#00FF00'
+COLOR_BLUE = '#1f77b4'    # Azul para ENZ
+COLOR_ORANGE = '#ff7f0e'  # Naranja para ENE  
+COLOR_GREEN = '#2ca02c'   # Verde para ENN
+COLOR_RED = '#d62728'     # Rojo para CREIME_RT
+COLOR_PURPLE = '#9467bd'  # Púrpura para marcadores
+
+import threading
 
 class RealTimeVisualizer:
     """Sistema de visualización para monitor en tiempo real"""
@@ -91,14 +105,18 @@ class RealTimeVisualizer:
         self.data_enz = deque(maxlen=MAX_VISUALIZATION_SAMPLES)
         self.data_ene = deque(maxlen=MAX_VISUALIZATION_SAMPLES) 
         self.data_enn = deque(maxlen=MAX_VISUALIZATION_SAMPLES)
+        self.creime_times = deque(maxlen=60)  # Buffer más grande para CREIME_RT
+        self.creime_values = deque(maxlen=60)
         
         # Líneas de gráfico
-        self.line_enz, self.line_ene, self.line_enn = None, None, None
+        self.line_enz, self.line_ene, self.line_enn, self.line_creime = None, None, None, None
         self.info_text = None
         
-        # Marcadores de ventana CREIME_RT
+        # Marcadores de ventana CREIME_RT sincronizados
         self.creime_markers = []
         self.processing_window_markers = []
+        self.current_processing_window = None
+        self.processing_window_start = None
         
         # Historial de máximos para ajuste suave
         self.max_values_history = {
@@ -130,20 +148,22 @@ class RealTimeVisualizer:
                 'figure.titlesize': 16
             })
             
-            self.fig, self.axes = plt.subplots(3, 1, figsize=(16, 10), dpi=120)
-            self.ax1, self.ax2, self.ax3 = self.axes
+            self.fig, self.axes = plt.subplots(4, 1, figsize=(16, 12), dpi=120)
+            self.ax1, self.ax2, self.ax3, self.ax4 = self.axes
             
             self.fig.suptitle('CREIME_RT MONITOR - Datos en Tiempo Real', 
                              fontsize=16, fontweight='bold')
             
-            self.line_enz, = self.ax1.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENZ')
-            self.line_ene, = self.ax2.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENE')
-            self.line_enn, = self.ax3.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENN')
+            self.line_enz, = self.ax1.plot([], [], color=COLOR_BLUE, linewidth=1.0, label='ENZ')
+            self.line_ene, = self.ax2.plot([], [], color=COLOR_ORANGE, linewidth=1.0, label='ENE')
+            self.line_enn, = self.ax3.plot([], [], color=COLOR_GREEN, linewidth=1.0, label='ENN')
+            self.line_creime, = self.ax4.plot([], [], color=COLOR_RED, linewidth=2.0, label='CREIME_RT')
             
             components_config = [
-                (self.ax1, 'Componente Vertical (ENZ)', COLOR_TEAL),
-                (self.ax2, 'Componente Este-Oeste (ENE)', COLOR_TEAL),
-                (self.ax3, 'Componente Norte-Sur (ENN)', COLOR_TEAL)
+                (self.ax1, 'Componente Vertical (ENZ)', COLOR_BLUE),
+                (self.ax2, 'Componente Este-Oeste (ENE)', COLOR_ORANGE),
+                (self.ax3, 'Componente Norte-Sur (ENN)', COLOR_GREEN),
+                (self.ax4, 'Salida CREIME_RT (Raw Output)', COLOR_RED)
             ]
             
             for ax, title, color in components_config:
@@ -154,11 +174,23 @@ class RealTimeVisualizer:
                 ax.legend(loc='upper right')
                 ax.tick_params(axis='both', which='major', labelsize=10)
             
-            self.ax3.set_xlabel('Tiempo (segundos)', fontsize=12)
+            self.ax4.set_xlabel('Tiempo (segundos)', fontsize=12)
             
-            self.info_text = self.ax3.text(0.02, 0.95, '', transform=self.ax3.transAxes, 
+            # Configuración especial para CREIME_RT
+            self.ax4.set_ylabel('Raw Output', fontsize=12)
+            self.ax4.axhline(y=2.0, color='red', linestyle='--', linewidth=2, alpha=0.8, label='Umbral +2.0')
+            self.ax4.axhline(y=0, color='green', linestyle='--', linewidth=1, alpha=0.6, label='Cero')
+            self.ax4.axhline(y=-4.0, color='gray', linestyle='--', linewidth=1, alpha=0.6, label='Ruido -4.0')
+            
+            self.info_text = self.ax4.text(0.02, 0.95, '', transform=self.ax4.transAxes, 
                                           fontsize=10, verticalalignment='top', color=COLOR_ORANGE,
                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Texto adicional para ventana CREIME_RT
+            self.creime_window_text = self.ax1.text(0.98, 0.95, '', transform=self.ax1.transAxes, 
+                                                   fontsize=9, verticalalignment='top', 
+                                                   horizontalalignment='right', color=COLOR_PURPLE,
+                                                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
             
             # Configurar marcadores de ventana de procesamiento
             self.setup_processing_markers()
@@ -178,14 +210,14 @@ class RealTimeVisualizer:
             return
             
         try:
-            for ax in [self.ax1, self.ax2, self.ax3]:
+            for ax in [self.ax1, self.ax2, self.ax3, self.ax4]:
                 if ax is None:
                     continue
                 # Línea vertical para marcar ventana actual de procesamiento
-                window_line = ax.axvline(x=0, color=COLOR_GREEN, linestyle='-', 
-                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (30s)')
+                window_line = ax.axvline(x=0, color=COLOR_PURPLE, linestyle='-', 
+                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (15s)')
                 # Área sombreada para ventana de procesamiento
-                window_fill = ax.axvspan(0, 30, color=COLOR_GREEN, alpha=0.15)
+                window_fill = ax.axvspan(0, 15, color=COLOR_PURPLE, alpha=0.15)
                 
                 self.processing_window_markers.append({
                     'line': window_line,
@@ -224,25 +256,42 @@ class RealTimeVisualizer:
         return y_min, y_max
     
     def update_data(self, component, data, timestamp):
-        """Actualización de datos para visualización en tiempo real"""
+        """Actualización no bloqueante de datos para visualización"""
         if not self.visualization_enabled:
             return
             
-        current_time = time.time()
-        
-        with self.lock:
-            self.packet_count += 1
+        try:
+            current_time = time.time()
             
-            for i, value in enumerate(data):
-                sample_time = current_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
-                
-                if component == 'ENZ':
-                    self.times.append(sample_time)
-                    self.data_enz.append(value)
-                elif component == 'ENE':
-                    self.data_ene.append(value)
-                elif component == 'ENN':
-                    self.data_enn.append(value)
+            # Usar trylock para evitar bloqueos
+            if self.lock.acquire(blocking=False):
+                try:
+                    self.packet_count += 1
+                    
+                    for i, value in enumerate(data):
+                        sample_time = current_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
+                        
+                        if component == 'ENZ':
+                            self.times.append(sample_time)
+                            self.data_enz.append(value)
+                        elif component == 'ENE':
+                            self.data_ene.append(value)
+                        elif component == 'ENN':
+                            self.data_enn.append(value)
+                finally:
+                    self.lock.release()
+        except:
+            pass  # No bloquear por errores de visualización
+    
+    def mark_processing_window(self, window_start_time):
+        """Marca la ventana que está siendo procesada por CREIME_RT"""
+        try:
+            if self.visualization_enabled:
+                current_time = time.time()
+                self.current_processing_window = current_time - window_start_time
+                self.processing_window_start = window_start_time
+        except:
+            pass
     
     def update_plot(self, frame):
         """Actualización de gráficos"""
@@ -272,8 +321,14 @@ class RealTimeVisualizer:
         self.line_enn.set_data(rel_times, enn_trim)
         
         xlim = (DISPLAY_SECONDS, 0)
-        for ax in self.axes:
+        for ax in self.axes[:3]:  # Solo para componentes sísmicas
             ax.set_xlim(xlim)
+        
+        # CREIME_RT usa la misma escala de tiempo (15 segundos)
+        if len(self.creime_times) > 0:
+            self.ax4.set_xlim(xlim)
+        else:
+            self.ax4.set_xlim((15, 0))
         
         ylim_enz = self.calculate_dynamic_ylimits(enz_trim, 'ENZ')
         ylim_ene = self.calculate_dynamic_ylimits(ene_trim, 'ENE')
@@ -282,6 +337,9 @@ class RealTimeVisualizer:
         self.ax1.set_ylim(ylim_enz)
         self.ax2.set_ylim(ylim_ene)
         self.ax3.set_ylim(ylim_enn)
+        
+        # Actualizar gráfico CREIME_RT
+        self.update_creime_plot()
         
         # Actualizar marcadores de ventana de procesamiento
         self.update_processing_markers(rel_times)
@@ -296,35 +354,88 @@ class RealTimeVisualizer:
         if hasattr(self.detector, 'processing_count'):
             detector_info += f" | Ventanas: {self.detector.processing_count}"
         
+        # Información de ventana CREIME_RT activa
+        window_info = ""
+        if self.current_processing_window is not None:
+            window_info = f" | Ventana CREIME_RT: {self.current_processing_window:.1f}s-{max(0, self.current_processing_window-15):.1f}s"
+        
         info_text = (f"Tiempo: {current_time_str} | "
                     f"Paquetes: {self.packet_count} | "
                     f"Rate: {packets_per_sec:.1f} pkt/s | "
-                    f"Muestras: {min_len}{detector_info}")
+                    f"Muestras: {min_len}{detector_info}{window_info}")
         
         self.info_text.set_text(info_text)
         
-        return []
+        # Actualizar texto de ventana CREIME_RT
+        if hasattr(self, 'creime_window_text') and self.current_processing_window is not None:
+            window_text = f"CREIME_RT procesando:\n{self.current_processing_window:.1f}s - {max(0, self.current_processing_window-15):.1f}s"
+            self.creime_window_text.set_text(window_text)
+        
+        return [self.line_enz, self.line_ene, self.line_enn, self.line_creime]
+    
+    def update_creime_plot(self):
+        """Actualiza el gráfico de CREIME_RT"""
+        if len(self.creime_times) < 1:
+            return
+            
+        try:
+            current_time = time.time()
+            creime_times_array = np.array(self.creime_times)
+            creime_values_array = np.array(self.creime_values)
+            
+            # Convertir a tiempo relativo (segundos atrás) - igual que otros subplots
+            rel_creime_times = current_time - creime_times_array
+            
+            self.line_creime.set_data(rel_creime_times, creime_values_array)
+            
+            # Límites dinámicos para CREIME_RT (sin límite máximo)
+            if len(creime_values_array) > 0:
+                y_min = min(-5.0, np.min(creime_values_array) - 0.5)
+                y_max = max(3.0, np.max(creime_values_array) + 0.5)  # Se expande automáticamente
+                self.ax4.set_ylim(y_min, y_max)
+                
+        except Exception as e:
+            logging.debug(f"Error actualizando CREIME_RT: {e}")
+    
+    def add_creime_value(self, value, timestamp):
+        """Añade valor CREIME_RT al gráfico"""
+        if not self.visualization_enabled:
+            return
+            
+        try:
+            with self.lock:
+                self.creime_times.append(timestamp)
+                self.creime_values.append(value)
+        except:
+            pass
     
     def update_processing_markers(self, rel_times):
-        """Actualiza marcadores de ventana de procesamiento CREIME_RT"""
+        """Actualiza marcadores sincronizados con ventana CREIME_RT activa"""
         if not self.processing_window_markers or len(rel_times) == 0:
             return
             
         try:
-            # La ventana de procesamiento son los últimos 30 segundos
-            window_start = 30  # 30 segundos atrás
-            window_end = 0     # Tiempo actual
+            # Mostrar ventana exacta que está procesando CREIME_RT
+            if self.current_processing_window is not None:
+                window_start = self.current_processing_window
+                window_end = max(0, self.current_processing_window - 15)  # 15s hacia atrás
+            else:
+                # Ventana por defecto: últimos 15 segundos
+                window_start = 15
+                window_end = 0
             
             for markers in self.processing_window_markers:
-                # Actualizar línea de ventana actual
-                markers['line'].set_xdata([window_end, window_end])
+                # Actualizar línea de inicio de ventana
+                markers['line'].set_xdata([window_start, window_start])
                 
-                # Actualizar área sombreada de ventana
+                # Actualizar área sombreada de ventana activa
                 try:
                     markers['fill'].remove()
                     ax = markers['line'].axes
-                    markers['fill'] = ax.axvspan(window_start, window_end, 
-                                                color=COLOR_GREEN, alpha=0.15)
+                    if ax != self.ax4:  # No mostrar en gráfico CREIME_RT
+                        markers['fill'] = ax.axvspan(window_start, window_end, 
+                                                    color=COLOR_PURPLE, alpha=0.2,
+                                                    label='Ventana CREIME_RT Activa')
                 except:
                     pass
                     
@@ -332,20 +443,32 @@ class RealTimeVisualizer:
             logging.debug(f"Error actualizando marcadores: {e}")
     
     def start_visualization(self):
-        """Inicia visualización en thread principal"""
+        """Inicia visualización en hilo separado"""
         if not self.visualization_enabled or not self.fig:
             return
             
         try:
             self.running = True
-            # Crear animación sin blit para evitar problemas de threading
-            self.animation = animation.FuncAnimation(
-                self.fig, self.update_plot, interval=200, blit=False, cache_frame_data=False
+            # Crear animación en hilo separado para no bloquear
+            self.viz_thread = threading.Thread(
+                target=self._run_visualization,
+                name="Visualizer",
+                daemon=True
             )
+            self.viz_thread.start()
 
         except Exception as e:
             logging.error(f"Error iniciando visualización: {e}")
             self.visualization_enabled = False
+    
+    def _run_visualization(self):
+        """Ejecuta visualización en hilo separado"""
+        try:
+            self.animation = animation.FuncAnimation(
+                self.fig, self.update_plot, interval=1000, blit=False, cache_frame_data=False
+            )
+        except Exception as e:
+            logging.warning(f"Error en hilo de visualización: {e}")
     
     def on_window_close(self, event):
         """Maneja el cierre de la ventana del visualizador"""
@@ -411,12 +534,12 @@ class UltraFastBuffer:
         self.new_data_event.clear()
     
     def get_latest_window(self):
-        """Ventana deslizante de latencia mínima - siempre los últimos 30s"""
+        """Ventana deslizante ultra-rápida para latencia <1.5s"""
         with self.lock:
             current_time = time.time()
             
-            # FORZAR procesamiento cada 100ms
-            if current_time - self.last_window_time < 0.1:
+            # CRÍTICO: Procesar cada 500ms para latencia mínima
+            if current_time - self.last_window_time < 0.5:
                 return None
                 
             if not self.ready:
@@ -426,9 +549,9 @@ class UltraFastBuffer:
             for component in ['ENZ', 'ENE', 'ENN']:
                 buf = self.buffers[component]
                 
-                # Usar directamente el buffer circular (siempre los últimos 30s)
+                # Usar directamente el buffer circular (siempre los últimos 15s)
                 if len(buf) == self.window_size:
-                    component_data = list(buf)  # Los últimos 3000 datos
+                    component_data = list(buf)  # Los últimos 1500 datos
                 else:
                     # Rellenar solo si no tenemos ventana completa aún
                     padding_needed = self.window_size - len(buf)
@@ -437,6 +560,7 @@ class UltraFastBuffer:
                 window_data.append(component_data)
             
             try:
+                # Usar directamente 1500 muestras (15 segundos) para CREIME_RT
                 window_3d = np.stack([window_data[0], window_data[1], window_data[2]], axis=1)
                 window_3d = np.expand_dims(window_3d, axis=0).astype(np.float32)
                 
@@ -466,35 +590,99 @@ class UltraFastBuffer:
             
             return status
 
-class OptimizedHybridFilter:
-    """Filtro optimizado: Solo Z-Score (sin conversión a Gals)"""
+class OptimizedSeismicFilter:
+    """Filtro pasa-bandas + Z-Score en tiempo real (latencia mínima)"""
     
-    def __init__(self, fs=100):
+    def __init__(self, fs=100, lowcut=1.0, highcut=45.0, order=4):
         self.fs = fs
-        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score (1 segundo)
-    
-    def apply_filter(self, data):
-        """Aplica normalización Z-Score requerida por CREIME_RT"""
-        if not data:
-            return data
-            
-        # Actualizar buffer Z-Score
-        self.zscore_buffer.extend(data)
         
-        # Normalizar solo si tenemos suficientes datos
-        if len(self.zscore_buffer) > 1:
-            buffer_array = np.array(self.zscore_buffer)
-            mean_val = np.mean(buffer_array)
-            std_val = np.std(buffer_array)
+        # Filtro pasa-bandas IIR Butterworth (solución del documento)
+        from scipy.signal import butter, sosfilt_zi
+        
+        try:
+            # Diseño del filtro en formato SOS (super estable para tiempo real)
+            self.sos = butter(order, [lowcut, highcut], btype='band', fs=fs, output='sos')
             
-            if std_val > 0:
-                normalized_data = [(x - mean_val) / std_val for x in data]
-            else:
-                normalized_data = [0.0] * len(data)
-        else:
-            normalized_data = [0.0] * len(data)
+            # Diagnóstico detallado
+            logging.info(f"SOS shape: {self.sos.shape}, dtype: {self.sos.dtype}")
+            logging.info(f"SOS primeras secciones: {self.sos[:2] if len(self.sos) > 0 else 'vacío'}")
             
-        return normalized_data
+            # Validar formato SOS antes de usar sosfilt_zi
+            if self.sos.ndim != 2 or self.sos.shape[1] != 6:
+                raise ValueError(f"SOS formato incorrecto: {self.sos.shape}, esperado (n, 6)")
+            
+            # Estado inicial para cada componente - sección por sección
+            def create_filter_state():
+                states = []
+                for i in range(self.sos.shape[0]):
+                    section = self.sos[i]  # Extraer sección individual
+                    zi = sosfilt_zi(section.reshape(1, 6))  # Asegurar forma (1, 6)
+                    states.append(zi)
+                return states
+            
+            self.filter_states = {
+                'ENZ': create_filter_state(),
+                'ENE': create_filter_state(),
+                'ENN': create_filter_state()
+            }
+            
+            logging.info(f"Filtro inicializado: {self.sos.shape[0]} secciones, {lowcut}-{highcut}Hz")
+            
+        except Exception as e:
+            logging.error(f"Error inicializando filtro: {e}")
+            logging.error(f"Parámetros: fs={fs}, lowcut={lowcut}, highcut={highcut}, order={order}")
+            # Fallback: sin filtrado
+            self.sos = None
+            self.filter_states = {'ENZ': None, 'ENE': None, 'ENN': None}
+        
+        # Sin normalización Z-Score - usar datos filtrados directamente
+        self.current_component = None
+    
+
+    
+
+    
+    def set_component(self, component):
+        """Establece el componente actual para normalización"""
+        self.current_component = component
+    
+    def _apply_bandpass_filter(self, data, component):
+        """Aplica filtro pasa-bandas IIR - implementación del documento"""
+        if self.sos is None or component not in self.filter_states or self.filter_states[component] is None:
+            return data  # Sin filtrado si hay error o componente desconocido
+        
+        try:
+            from scipy.signal import sosfilt
+            
+            # Aplicar filtro sección por sección
+            filtered = np.array(data, dtype=np.float64).copy()
+            zi_states = self.filter_states[component]
+            
+            for i in range(self.sos.shape[0]):
+                section = self.sos[i].reshape(1, 6)  # Asegurar forma correcta
+                filtered, zi_states[i] = sosfilt(section, filtered, zi=zi_states[i])
+            
+            # Actualizar estado para próximo paquete
+            self.filter_states[component] = zi_states
+            
+            return filtered.tolist()
+            
+        except Exception as e:
+            logging.warning(f"Error en filtro para {component}: {e}")
+            return data  # Retornar datos sin filtrar si hay error
+    
+    def apply_filter(self, data, component=None):
+        """Pipeline sin normalización: Solo filtro + escala fija"""
+        if not data:
+            return []
+        
+        # PASO 1: Filtro pasa-bandas 1-40Hz
+        filtered_data = self._apply_bandpass_filter(data, component)
+        
+        # PASO 2: Conversión a Gals como AnyShake-data-stream.py
+        gals_data = [x * CONVERSION_FACTOR for x in filtered_data]  # 0.119 Gals
+        
+        return gals_data
 
 class UltraFastProcessingPipeline:
     """Pipeline de procesamiento para monitor"""
@@ -502,7 +690,7 @@ class UltraFastProcessingPipeline:
     def __init__(self, model_path, num_workers=1):
         self.model_path = model_path
         self.num_workers = num_workers
-        self.processing_queue = queue.Queue(maxsize=2)
+        self.processing_queue = queue.Queue(maxsize=3)  # Buffer optimizado para latencia
         self.result_queue = queue.Queue()
         self.workers = []
         self.running = False
@@ -527,11 +715,33 @@ class UltraFastProcessingPipeline:
     def processing_worker(self):
         """Worker para CREIME_RT en monitor"""
         try:
+            # Configurar TensorFlow para uso eficiente de memoria
+            import tensorflow as tf
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                try:
+                    # Habilitar crecimiento de memoria dinámico
+                    for gpu in gpus:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                    # Limitar memoria GPU a 1GB para CREIME_RT
+                    tf.config.experimental.set_virtual_device_configuration(
+                        gpus[0],
+                        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)]
+                    )
+                except RuntimeError as e:
+                    logging.warning(f"Error configurando GPU: {e}")
+            
             from saipy.models.creime import CREIME_RT
-            # Validar ruta del modelo para prevenir CWE-94
-            if not os.path.isfile(self.model_path) or not self.model_path.endswith(('.h5', '.hdf5', '.pb')):
-                raise ValueError(f"Ruta de modelo inválida: {self.model_path}")
+            # Validar directorio del modelo para prevenir CWE-94
+            if not os.path.isdir(self.model_path):
+                raise ValueError(f"Directorio de modelo inválido: {self.model_path}")
+            
+            # CREIME_RT espera el directorio donde están los archivos del modelo
             model = CREIME_RT(self.model_path)
+            
+            # Forzar garbage collection después de cargar modelo
+            import gc
+            gc.collect()
             
             # Señalar que el worker está listo
             self.worker_initialized = True
@@ -561,10 +771,12 @@ class UltraFastProcessingPipeline:
                     else:
                         raw_output = -4.0
                     
-                    # UMBRAL SINCRONIZADO CON SIMULADOR: -3.5
-                    if raw_output > -3.5:
+                    # UMBRAL ALTO: +2.0
+                    if raw_output > 2.0:
                         detection = 1
                         magnitude = raw_output if raw_output > 0 else 0.0
+                        # DIAGNÓSTICO: Log inmediato de detección
+                        logging.critical(f"DETECCIÓN INMEDIATA: Raw={raw_output:.3f} > +2.0 en ventana {processing_id}")
                     else:
                         detection = 0
                         magnitude = None
@@ -602,10 +814,16 @@ class UltraFastProcessingPipeline:
     def submit_window(self, window_data, processing_id):
         """Envía ventana para procesamiento"""
         try:
-            self.processing_queue.put((window_data, processing_id), timeout=0.1)
+            self.processing_queue.put((window_data, processing_id), timeout=0.2)  # Timeout agresivo
             return True
         except queue.Full:
-            return False
+            # CRÍTICO: Descartar ventana antigua para mantener latencia
+            try:
+                self.processing_queue.get_nowait()
+                self.processing_queue.put((window_data, processing_id), timeout=0.1)
+                return True
+            except:
+                return False
     
     def get_result(self, timeout=0.5):
         """Obtiene resultado"""
@@ -639,8 +857,8 @@ class RealTimeMonitor:
     
     def __init__(self, model_path, host='localhost', port=30000, sampling_rate=100):
         # Validación de seguridad para prevenir CWE-94
-        if not isinstance(model_path, str) or not os.path.isfile(model_path):
-            raise ValueError("model_path debe ser una ruta válida")
+        if not isinstance(model_path, str) or not os.path.isdir(model_path):
+            raise ValueError("model_path debe ser un directorio válido")
         if not isinstance(host, str) or len(host) > 253:
             raise ValueError("host inválido")
         if not isinstance(port, int) or not (1 <= port <= 65535):
@@ -654,10 +872,10 @@ class RealTimeMonitor:
         self.sampling_rate = sampling_rate
         
         # Parámetros sincronizados con AnyShake (se ajustarán dinámicamente)
-        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
+        self.window_size = 15 * sampling_rate  # 1500 muestras - 15 SEGUNDOS
         self.anyshake_packet_interval = 1.0  # Inicial - se actualizará según modo
         self.latency_target = self.anyshake_packet_interval  # Sincronización dinámica
-        self.detection_threshold = -3.5  # Umbral sincronizado con simulador
+        self.detection_threshold = 2.0  # Umbral alto para eventos significativos
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
         self.magnitude_threshold = 0.0  # Umbral original para magnitud
@@ -670,7 +888,7 @@ class RealTimeMonitor:
             update_interval=self.anyshake_packet_interval  # Sincronizado con AnyShake
         )
         
-        self.hybrid_filter = OptimizedHybridFilter(fs=sampling_rate)
+        self.seismic_filter = OptimizedSeismicFilter(fs=sampling_rate, lowcut=1.0, highcut=40.0, order=4)
         self.processing_pipeline = UltraFastProcessingPipeline(model_path, num_workers=1)
         self.visualizer = RealTimeVisualizer(self)
         
@@ -681,12 +899,17 @@ class RealTimeMonitor:
         
         # Estadísticas
         self.detection_count = 0
+        self.anomaly_count = 0
+        self.confirmed_earthquake_count = 0
         self.last_detection_time = None
         self.packet_count = 0
         self.start_time = None
         self.processing_count = 0
         self.last_processing_time = 0
-        self.detection_buffer = deque(maxlen=self.consecutive_windows)
+        
+        # Buffer para confirmación de sismos (3 anomalías consecutivas)
+        self.anomaly_buffer = deque(maxlen=3)
+        self.consecutive_anomalies = 0
         
         # Configuración de estación
         self.station_id = "CREIME_RT_MONITOR"
@@ -715,6 +938,9 @@ class RealTimeMonitor:
         self.data_thread = None
         self.processing_thread = None
         
+        # Control de parada
+        self.stop_called = False
+        
         logging.info(f"Monitor CREIME_RT configurado - {host}:{port}")
     
     def enable_anyshake_realtime(self):
@@ -742,19 +968,14 @@ class RealTimeMonitor:
         # Activar modo tiempo real
         self.enable_anyshake_realtime()
         
-        # FORZAR modo tiempo real desde el inicio
-        self.anyshake_packet_interval = 0.1  # FORZAR 100ms
-        self.latency_target = 0.1
-        self.buffer.update_interval = 0.1
-        logging.info("FORZANDO modo tiempo real (100ms) - Esperando 10 pkt/s")
-        
-        # FORZAR cambio directo en el buffer
-        with self.buffer.lock:
-            self.buffer.update_interval = 0.1
-        logging.info("Buffer forzado a 100ms - Procesamiento cada 0.1s")
+        # Configuración estable para modo REALTIME
+        self.anyshake_packet_interval = 1.0  # Mantener 1 segundo inicial
+        self.latency_target = 1.0
+        self.buffer.update_interval = 1.0
+        logging.info("Modo REALTIME activado - Esperando datos cada 1s")
         
         time.sleep(2)  # Esperar activación
-        logging.info("Sistema configurado en modo ULTRA RÁPIDO - Buffer 100ms")
+        logging.info("Sistema configurado en modo estable - Buffer 1s")
         
         if self.socket is None:
             try:
@@ -815,14 +1036,14 @@ class RealTimeMonitor:
             if not data_values:
                 return None
                 
-            # Aplicar normalización Z-Score (sin conversión a Gals)
-            normalized_data = self.hybrid_filter.apply_filter(data_values)
+            # Pipeline completo: Filtro pasa-bandas → Z-Score Welford
+            processed_data = self.seismic_filter.apply_filter(data_values, component)
                 
             return {
                 'component': component,
                 'timestamp': timestamp,
                 'sampling_rate': sample_rate,
-                'data': normalized_data,
+                'data': processed_data,
                 'sequence': sequence,
                 'checksum': checksum
             }
@@ -832,11 +1053,11 @@ class RealTimeMonitor:
             return None
     
     def ultra_fast_processing(self):
-        """Procesamiento ultra-rápido adaptativo según modo AnyShake"""
+        """Procesamiento ultra-rápido para alerta sísmica temprana"""
         current_time = time.time()
         
-        # Procesamiento ULTRA RÁPIDO - cada 50ms
-        min_interval = 0.05  # FIJO 50ms para máxima velocidad
+        # CRÍTICO: Procesar cada 100ms para detección inmediata
+        min_interval = 0.1  # Máxima frecuencia para detección temprana
         if current_time - self.last_processing_time < min_interval:
             return None
         
@@ -849,7 +1070,7 @@ class RealTimeMonitor:
             self.processing_count += 1
             self.last_processing_time = current_time
             
-            result_data = self.processing_pipeline.get_result(timeout=0.3)
+            result_data = self.processing_pipeline.get_result(timeout=0.3)  # Timeout agresivo
             
             if result_data:
                 processing_time = time.time() - current_time
@@ -861,7 +1082,8 @@ class RealTimeMonitor:
                     'confidence': self._calculate_confidence(result_data),
                     'processing_id': processing_id,
                     'processing_time': processing_time,
-                    'window_data': window_data
+                    'window_data': window_data,
+                    'window_start_time': current_time - 30  # Inicio de ventana de 30s
                 }
         
         return None
@@ -874,9 +1096,9 @@ class RealTimeMonitor:
             else:
                 raw_output = self.noise_baseline
             
-            # Mostrar timestamp actual en tiempo real
+            # Log normal de valores CREIME_RT
             current_time = datetime.now()
-            logging.info(f"[{current_time}] CREIME_RT Raw Output: {raw_output:.2f}")
+            logging.info(f"[{current_time}] CREIME_RT Raw Output: {raw_output:.3f}")
             
             return raw_output
             
@@ -887,47 +1109,52 @@ class RealTimeMonitor:
             return self.noise_baseline
     
     def evaluate_detection(self, result):
-        """Evaluación original CREIME_RT"""
-        if result and result['confidence'] > self.detection_threshold:
-            # Clasificación original CREIME_RT
-            is_seismic = result['confidence'] > self.magnitude_threshold
+        """Sistema de clasificación de tres niveles"""
+        if not result:
+            return False
             
-            logging.info(f"DETECCIÓN: Confianza {result['confidence']:.2f} > {self.detection_threshold}")
-            
-            return {
-                'type': 'event_detected',
-                'consecutive_detections': 1,
-                'is_seismic': is_seismic
-            }
+        confidence = result['confidence']
         
-        return False
+        # 1. Anomalía detectada: supera umbral +2.0
+        if confidence > self.detection_threshold:
+            self.anomaly_buffer.append(True)
+            self.consecutive_anomalies += 1
+            self.anomaly_count += 1
+            
+            logging.warning(f"🟡 ANOMALÍA DETECTADA: Confianza {confidence:.2f} > +2.0")
+            
+            # 2. Sismo confirmado: 3 anomalías consecutivas
+            if self.consecutive_anomalies >= 3:
+                self.confirmed_earthquake_count += 1
+                logging.critical(f"🚨 SISMO CONFIRMADO 🚨 - 3 anomalías consecutivas")
+                
+                return {
+                    'type': 'confirmed_earthquake',
+                    'consecutive_anomalies': self.consecutive_anomalies,
+                    'is_seismic': True
+                }
+            else:
+                return {
+                    'type': 'anomaly_detected', 
+                    'consecutive_anomalies': self.consecutive_anomalies,
+                    'is_seismic': False
+                }
+        else:
+            # 3. Ruido: resetear contador de anomalías consecutivas
+            if self.consecutive_anomalies > 0:
+                self.consecutive_anomalies = 0
+                self.anomaly_buffer.clear()
+            
+            return False
     
-    def _apply_magnitude_correction(self, raw_output):
-        """Corrección de magnitud según reglas especificadas"""
-        # Ruido: sin magnitud
-        if raw_output <= -3.5:
-            return None
-        
-        # Evento débil: fórmula lineal
-        if -3.5 < raw_output < 0.0:
-            return round(0.21 * raw_output + 4.2, 1)
-        
-        # Saturación máxima
-        if raw_output > 5.3:
-            return 8.8
-        
-        # Mapeo lineal para raw_output ≥ 0.0
-        # magnitud = 0.855 × raw_output + 4.2
-        magnitude = 0.855 * raw_output + 4.2
-        
-        return round(magnitude, 1)
+
     
     def _is_seismic_event(self, result):
         """Clasificación original CREIME_RT"""
         return result['confidence'] > self.magnitude_threshold
     
     def trigger_alert(self, detection_result, detection_info):
-        """Activa alerta según protocolo oficial CREIME_RT"""
+        """Activa alerta según sistema de tres niveles"""
         self.detection_count += 1
         self.last_detection_time = detection_result['timestamp']
         
@@ -938,49 +1165,44 @@ class RealTimeMonitor:
         if self.first_detection_time is None:
             self.first_detection_time = event_time
         
-        if detection_info['is_seismic']:
-            # Registrar primera confirmación de sismo
+        if detection_info['type'] == 'confirmed_earthquake':
+            # SISMO CONFIRMADO: Solo aquí se generan archivos JSON y MiniSEED
             if self.first_confirmation_time is None:
                 self.first_confirmation_time = event_time
             
-            # Aplicar corrección de magnitud para sismos confirmados
-            raw_confidence = detection_result['confidence']
-            corrected_magnitude = self._apply_magnitude_correction(raw_confidence)
+            # Usar salida cruda de CREIME_RT como magnitud directamente
+            raw_magnitude = detection_result['confidence']
             
-            # Log de corrección para análisis
-            if corrected_magnitude is not None:
-                logging.debug(f"Corrección magnitud: {raw_confidence:.2f} → {corrected_magnitude:.1f}")
-            else:
-                logging.debug(f"Ruido detectado: {raw_confidence:.2f} ≤ -3.5 (sin magnitud)")
+            logging.critical(f"🚨 SISMO CONFIRMADO 🚨 - Magnitud: {raw_magnitude:.2f}")
             
-            mag_display = f"{corrected_magnitude:.1f}" if corrected_magnitude is not None else "Sin magnitud (ruido)"
-            logging.critical(f"SISMO CONFIRMADO - Raw: {detection_result['confidence']:.2f} - Magnitud: {mag_display}")
-            
-            # Registrar evento detectado con magnitud corregida
+            # Registrar evento confirmado
             self.detected_events.append({
-                'type': 'seismic',
+                'type': 'confirmed_earthquake',
                 'event_time': event_time,
                 'confidence': detection_result['confidence'],
-                'magnitude': detection_result['magnitude'],
-                'corrected_magnitude': corrected_magnitude,
-                'processing_id': detection_result['processing_id']
+                'magnitude': raw_magnitude,
+                'processing_id': detection_result['processing_id'],
+                'consecutive_anomalies': detection_info['consecutive_anomalies']
             })
             
-            self.save_event_data(detection_result, corrected_magnitude)
-        else:
-            mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
-            logging.warning(f"EVENTO DETECTADO - Raw: {detection_result['confidence']:.2f} - Magnitud: {mag_display}")
+            # SOLO generar archivos para sismos confirmados
+            self.save_event_data(detection_result, raw_magnitude)
             
-            # Registrar evento detectado
+        elif detection_info['type'] == 'anomaly_detected':
+            # ANOMALÍA DETECTADA: Solo log, sin archivos
+            mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
+            
+            # Registrar anomalía (sin archivos)
             self.detected_events.append({
-                'type': 'event',
+                'type': 'anomaly',
                 'event_time': event_time,
                 'confidence': detection_result['confidence'],
                 'magnitude': detection_result['magnitude'],
-                'processing_id': detection_result['processing_id']
+                'processing_id': detection_result['processing_id'],
+                'consecutive_anomalies': detection_info['consecutive_anomalies']
             })
     
-    def save_event_data(self, detection_result, corrected_magnitude):
+    def save_event_data(self, detection_result, raw_magnitude):
         """Guarda datos del evento detectado en monitor"""
         try:
             events_dir = "events_monitor"
@@ -996,8 +1218,7 @@ class RealTimeMonitor:
                 "event_id": event_id,
                 "timestamp": detection_result['timestamp'].isoformat(),
                 "raw_output": detection_result['confidence'],
-                "magnitude": corrected_magnitude,
-                "original_magnitude": detection_result['magnitude']
+                "magnitude": raw_magnitude
             }
             
             json_filename = os.path.join(events_dir, f"monitor_event_{timestamp_str}.json")
@@ -1034,16 +1255,24 @@ class RealTimeMonitor:
                     # Rellenar con ceros si no hay suficientes datos
                     buffer_data = [0.0] * (6000 - len(buffer_data)) + buffer_data
                 
-                # Crear trace
+                # Validar datos para MiniSEED
+                if not buffer_data or all(x == 0 for x in buffer_data):
+                    logging.warning(f"Datos vacíos para {component}, omitiendo")
+                    continue
+                
+                # Crear trace con validación
                 stats = Stats()
                 stats.network = "SK"
                 stats.station = "MONITOR"
                 stats.location = "00"
                 stats.channel = channel_code
                 stats.sampling_rate = 100.0
-                stats.starttime = UTCDateTime(event_time) - 15  # 15 segundos antes del evento
+                stats.starttime = UTCDateTime(event_time) - 15
+                stats.npts = len(buffer_data)
                 
-                trace = Trace(data=np.array(buffer_data, dtype=np.float32), header=stats)
+                # Convertir a enteros para MiniSEED (evita errores de empaquetado)
+                int_data = np.array(buffer_data, dtype=np.int32)
+                trace = Trace(data=int_data, header=stats)
                 stream.append(trace)
             
             # Guardar MiniSEED
@@ -1061,27 +1290,37 @@ class RealTimeMonitor:
         
         while self.running:
             try:
-                if self.buffer.wait_for_new_data(timeout=0.3):
+                if self.buffer.wait_for_new_data(timeout=0.6):  # Timeout más agresivo
                     self.buffer.reset_data_event()
                     
                     result = self.ultra_fast_processing()
                     
                     if result:
+                        # Marcar ventana sincronizada en visualizador
+                        if hasattr(result, 'window_start_time'):
+                            self.visualizer.mark_processing_window(result['window_start_time'])
+                        
                         # Capturar valor y timestamp para estadísticas
                         self.creime_values.append(result['confidence'])
                         self.creime_timestamps.append(result['timestamp'])
+                        
+                        # Actualizar visualizador CREIME_RT
+                        self.visualizer.add_creime_value(result['confidence'], time.time())
                         
                         detection_info = self.evaluate_detection(result)
                         if detection_info:
                             self.trigger_alert(result, detection_info)
                 
-                # Limpieza periódica de memoria (cada hora)
+                # Limpieza periódica de memoria (frecuencia según modo)
                 cycle_count += 1
-                if cycle_count % 3600 == 0:  # 3600 segundos = 1 hora
-                    self._memory_cleanup()
-                    logging.info(f"Limpieza de memoria completada - Ciclo {cycle_count}")
+                cleanup_interval = 900 if getattr(self, 'production_mode', False) else 3600  # 15 min prod, 1 hora normal
+                if cycle_count % cleanup_interval == 0:
+                    try:
+                        self._memory_cleanup()
+                    except:
+                        pass  # No bloquear por errores de limpieza
                 
-                time.sleep(0.05)
+                time.sleep(0.05)  # Ciclo más rápido para tiempo real
                 
             except Exception as e:
                 logging.error(f"Error en bucle procesamiento monitor: {e}")
@@ -1095,14 +1334,22 @@ class RealTimeMonitor:
         
         while self.running:
             try:
-                data = self.socket.recv(4096)
-                if not data:
-                    logging.warning("Conexión cerrada - Reconectando...")
-                    if not self.connect_to_anyshake():
-                        time.sleep(3)
-                        continue
-                    else:
-                        continue
+                # Usar select para evitar errores de socket no bloqueante
+                import select
+                ready = select.select([self.socket], [], [], 0.05)  # Timeout ultra-corto
+                if ready[0]:
+                    data = self.socket.recv(4096)
+                    if not data:
+                        logging.warning("Conexión cerrada - Reconectando...")
+                        if not self.connect_to_anyshake():
+                            time.sleep(3)
+                            continue
+                        else:
+                            continue
+                else:
+                    # No hay datos disponibles, continuar
+                    time.sleep(0.005)  # Polling ultra-frecuente
+                    continue
                 
                 self.data_buffer += data
                 
@@ -1131,11 +1378,15 @@ class RealTimeMonitor:
                                     for _ in parsed_data['data']:
                                         self.miniseed_timestamps.append(current_time)
                                 
-                                self.visualizer.update_data(
-                                    parsed_data['component'],
-                                    parsed_data['data'],
-                                    current_time
-                                )
+                                # Actualizar visualizador de forma no bloqueante
+                                try:
+                                    self.visualizer.update_data(
+                                        parsed_data['component'],
+                                        parsed_data['data'],
+                                        current_time
+                                    )
+                                except:
+                                    pass  # No bloquear por errores de visualización
                                 
                                 self.packet_count += 1
                                 
@@ -1145,13 +1396,8 @@ class RealTimeMonitor:
                                     packet_rate = self.packet_count / elapsed if elapsed > 0 else 0
                                     expected_rate = 3.0 / self.anyshake_packet_interval  # 3 componentes
                                     
-                                    # Detectar modo tiempo real
+                                    # Detectar modo de operación
                                     if packet_rate > 8:
-                                        if self.anyshake_packet_interval != 0.1:
-                                            self.anyshake_packet_interval = 0.1
-                                            self.latency_target = 0.1
-                                            self.buffer.update_interval = 0.1
-                                            logging.info("MODO TIEMPO REAL ACTIVADO - 10 pkt/s")
                                         mode_status = "TIEMPO REAL"
                                     elif packet_rate > 2.5:
                                         mode_status = "NORMAL"
@@ -1160,13 +1406,17 @@ class RealTimeMonitor:
                                     
                                     if self.packet_count == 15:
                                         logging.info(f"Tasa: {packet_rate:.1f} pkt/s - {mode_status}")
-                                        if packet_rate > 8:
-                                            logging.info("AT+REALTIME=1 exitoso - Latencia optimizada")
+                                        if packet_rate > 2.5:
+                                            logging.info("AT+REALTIME=1 exitoso - Sistema estable")
                                 
                     except Exception as e:
                         continue
                         
             except socket.timeout:
+                continue
+            except (BlockingIOError, socket.error) as e:
+                # Errores normales de socket no bloqueante - no logear
+                time.sleep(0.01)  # Reintentos ultra-rápidos
                 continue
             except Exception as e:
                 if self.running:
@@ -1279,7 +1529,6 @@ class RealTimeMonitor:
                 self.visualizer.start_visualization()
         else:
             logging.error("Worker CREIME_RT no se inicializó correctamente")
-            logging.error("Visualizador NO iniciado - Sistema en modo degradado")
             self.stop_monitor()
             return False
         
@@ -1297,16 +1546,49 @@ class RealTimeMonitor:
         return True
     
     def _memory_cleanup(self):
-        """Limpieza periódica de memoria para operación 24/7"""
+        """Limpieza periódica de memoria optimizada para producción 24/7"""
         try:
-            # Limpiar buffers de estadísticas si son muy grandes
-            if len(self.creime_values) > 10000:
-                self.creime_values = self.creime_values[-5000:]  # Mantener últimos 5000
-                self.creime_timestamps = self.creime_timestamps[-5000:]
+            # Límites según modo
+            if getattr(self, 'production_mode', False):
+                max_values = 1800  # 30 min en producción
+                keep_values = 900   # Mantener 15 min
+                max_events = 50
+                keep_events = 25
+            else:
+                max_values = 10000  # Modo normal
+                keep_values = 5000
+                max_events = 100
+                keep_events = 50
             
-            # Garbage collection forzado
+            # Limpiar buffers de estadísticas
+            if len(self.creime_values) > max_values:
+                self.creime_values = self.creime_values[-keep_values:]
+                self.creime_timestamps = self.creime_timestamps[-keep_values:]
+            
+            # Limpiar eventos antiguos
+            if len(self.detected_events) > max_events:
+                self.detected_events = self.detected_events[-keep_events:]
+            
+            # Limpiar buffer de visualización en modo producción
+            if getattr(self, 'production_mode', False) and hasattr(self.visualizer, 'times'):
+                max_vis_samples = 30 * self.sampling_rate  # 30 segundos en producción
+                if len(self.visualizer.times) > max_vis_samples:
+                    with self.visualizer.lock:
+                        self.visualizer.times = deque(list(self.visualizer.times)[-max_vis_samples:], maxlen=max_vis_samples)
+                        self.visualizer.data_enz = deque(list(self.visualizer.data_enz)[-max_vis_samples:], maxlen=max_vis_samples)
+                        self.visualizer.data_ene = deque(list(self.visualizer.data_ene)[-max_vis_samples:], maxlen=max_vis_samples)
+                        self.visualizer.data_enn = deque(list(self.visualizer.data_enn)[-max_vis_samples:], maxlen=max_vis_samples)
+            
+            # Garbage collection agresivo
             import gc
-            gc.collect()
+            gc.collect(0)
+            gc.collect(1) 
+            gc.collect(2)
+            
+            # Log de uso de memoria
+            memory_percent = psutil.virtual_memory().percent
+            mode = "PRODUCCIÓN" if getattr(self, 'production_mode', False) else "NORMAL"
+            logging.info(f"Limpieza {mode} completada - RAM: {memory_percent:.1f}%")
             
         except Exception as e:
             logging.warning(f"Error en limpieza de memoria: {e}")
@@ -1323,6 +1605,10 @@ class RealTimeMonitor:
     
     def stop_monitor(self):
         """Detiene el monitor con limpieza completa"""
+        if self.stop_called:
+            return  # Evitar múltiples llamadas
+        
+        self.stop_called = True
         logging.info("Iniciando parada segura del monitor...")
         self.running = False
         
@@ -1333,7 +1619,8 @@ class RealTimeMonitor:
             logging.warning(f"Error deteniendo workers: {e}")
         
         try:
-            self.visualizer.stop_visualization()
+            if hasattr(self.visualizer, 'stop_visualization') and self.visualizer.stop_visualization:
+                self.visualizer.stop_visualization()
         except Exception as e:
             logging.warning(f"Error deteniendo visualizador: {e}")
         
@@ -1369,7 +1656,9 @@ class RealTimeMonitor:
             if self.first_confirmation_time:
                 logging.info(f"Primera Confirmación: {self.first_confirmation_time}")
             
-            logging.info(f"Eventos Detectados: {len(self.detected_events)}")
+            logging.info(f"Anomalías Detectadas: {self.anomaly_count}")
+            logging.info(f"Sismos Confirmados: {self.confirmed_earthquake_count}")
+            logging.info(f"Total Eventos: {len(self.detected_events)}")
             
             # Estadísticas de valores CREIME_RT para diagnóstico
             if hasattr(self, 'creime_values') and self.creime_values:
@@ -1385,25 +1674,38 @@ class RealTimeMonitor:
                 logging.info(f"  Porcentaje activación: {(above_threshold/len(self.creime_values)*100):.2f}%")
             
             if self.detected_events:
-                # Calcular magnitud máxima
+                # Calcular magnitud máxima de sismos confirmados
                 max_magnitude = 0.0
-                for event in self.detected_events:
-                    if event['type'] == 'seismic' and 'corrected_magnitude' in event:
-                        max_magnitude = max(max_magnitude, event['corrected_magnitude'])
+                confirmed_events = [e for e in self.detected_events if e['type'] == 'confirmed_earthquake']
                 
-                logging.info(f"Magnitud Final (Máxima): {max_magnitude:.1f}")
+                for event in confirmed_events:
+                    if 'magnitude' in event and event['magnitude']:
+                        max_magnitude = max(max_magnitude, event['magnitude'])
+                
+                if max_magnitude > 0:
+                    logging.info(f"Magnitud Final (Máxima): {max_magnitude:.2f}")
+                
                 logging.info(f"")
                 logging.info(f"Detalle de Eventos:")
-                for i, event in enumerate(self.detected_events, 1):
-                    event_type = "SÍSMICO" if event['type'] == 'seismic' else "EVENTO"
-                    logging.info(f"  {i}. {event_type}:")
-                    logging.info(f"     Tiempo: {event['event_time']}")
-                    logging.info(f"     Confianza: {event['confidence']:.2f}")
-                    if 'corrected_magnitude' in event:
-                        logging.info(f"     Magnitud: {event['corrected_magnitude']:.1f}")
-                    else:
-                        logging.info(f"     Magnitud: {event['magnitude']:.1f if event['magnitude'] else 'N/A'}")
-                    logging.info(f"     Ventana: {event['processing_id']}")
+                
+                # Agrupar por tipo
+                anomalies = [e for e in self.detected_events if e['type'] == 'anomaly']
+                earthquakes = [e for e in self.detected_events if e['type'] == 'confirmed_earthquake']
+                
+                if anomalies:
+                    logging.info(f"  Anomalías Detectadas ({len(anomalies)}):")
+                    for i, event in enumerate(anomalies, 1):
+                        logging.info(f"    {i}. Tiempo: {event['event_time']}")
+                        logging.info(f"       Confianza: {event['confidence']:.2f}")
+                        logging.info(f"       Consecutivas: {event['consecutive_anomalies']}/3")
+                
+                if earthquakes:
+                    logging.info(f"  Sismos Confirmados ({len(earthquakes)}):")
+                    for i, event in enumerate(earthquakes, 1):
+                        logging.info(f"    {i}. Tiempo: {event['event_time']}")
+                        logging.info(f"       Confianza: {event['confidence']:.2f}")
+                        logging.info(f"       Magnitud: {event['magnitude']:.2f}")
+                        logging.info(f"       Ventana: {event['processing_id']}")
             else:
                 logging.info(f"  No se detectaron eventos sísmicos")
             
@@ -1417,28 +1719,43 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Monitor CREIME_RT en tiempo real con AnyShake')
-    parser.add_argument('--model_path', default='../saipy/saved_models/', help='Ruta del modelo CREIME_RT')
+    parser.add_argument('--model_path', default='/home/aisaac/SAIPy/saipy/saved_models/', help='Directorio del modelo CREIME_RT')
     parser.add_argument('--host', default='localhost', help='Host de AnyShake Observer')
     parser.add_argument('--port', type=int, default=30000, help='Puerto de AnyShake Observer')
+    parser.add_argument('--production', action='store_true', help='Modo producción con optimizaciones de memoria')
     
     args = parser.parse_args()
     
-    # Buscar modelo automáticamente si es directorio
-    model_path = args.model_path
-    if os.path.isdir(model_path):
-        # Buscar archivos de modelo en el directorio
-        for ext in ['.h5', '.hdf5', '.pb']:
-            for file in os.listdir(model_path):
-                if file.endswith(ext):
-                    model_path = os.path.join(model_path, file)
-                    logging.info(f"Modelo encontrado: {model_path}")
-                    break
-            if os.path.isfile(model_path):
+    # Buscar directorio con modelo CREIME_RT
+    model_search_paths = [
+        args.model_path,
+        './saipy/saved_models/',
+        '../saipy/saved_models/',
+        '../../saipy/saved_models/',
+        '/home/aisaac/SAIPy/saipy/saved_models/',
+        './saved_models/',
+        '../saved_models/',
+        './models/',
+        '../models/'
+    ]
+    
+    model_dir = None
+    for search_path in model_search_paths:
+        if os.path.isdir(search_path):
+            # Verificar que contenga CREIME_RT.h5 y CREIME_RT.json
+            h5_file = os.path.join(search_path, 'CREIME_RT.h5')
+            json_file = os.path.join(search_path, 'CREIME_RT.json')
+            if os.path.isfile(h5_file) and os.path.isfile(json_file):
+                model_dir = search_path
                 break
     
-    if not os.path.isfile(model_path):
-        logging.error(f"No se encontró modelo válido en: {args.model_path}")
+    if not model_dir:
+        logging.error(f"No se encontró directorio con modelo CREIME_RT completo")
+        logging.error(f"Ubicaciones buscadas: {model_search_paths}")
+        logging.error(f"Se requieren archivos: CREIME_RT.h5 y CREIME_RT.json")
         sys.exit(1)
+    
+    logging.info(f"Directorio del modelo encontrado: {model_dir}")
     
     # Crear directorios
     for directory in ["logs", "events_monitor"]:
@@ -1452,12 +1769,24 @@ def main():
         logging.error("SAIPy no disponible")
         sys.exit(1)
     
-    # Crear monitor
+    # Configurar modo producción si está habilitado
+    if args.production:
+        logging.info("MODO PRODUCCIÓN ACTIVADO - Optimizaciones de memoria habilitadas")
+        # Reducir buffers de visualización para producción
+        global MAX_VISUALIZATION_SAMPLES, DISPLAY_SECONDS
+        DISPLAY_SECONDS = 30  # Reducir a 30 segundos
+        MAX_VISUALIZATION_SAMPLES = DISPLAY_SECONDS * SAMPLING_RATE
+    
+    # Crear monitor con directorio del modelo
     monitor = RealTimeMonitor(
-        model_path=model_path,
+        model_path=model_dir,
         host=args.host,
         port=args.port
     )
+    
+    # Configurar modo producción en el monitor
+    if args.production:
+        monitor.production_mode = True
     
     try:
         if monitor.start_monitor():
